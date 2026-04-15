@@ -340,6 +340,10 @@ class EthosAPIClient:
 
     # --- Browse ---
 
+    def list_roots(self) -> dict:
+        """List available root locations (home, disks, network mounts)."""
+        return self._request("GET", "/api/sync-drive/roots")
+
     def browse(self, remote_path: str = "/") -> dict:
         """List directory contents for folder browsing in UI."""
         return self._request("GET", "/api/sync-drive/browse", params={

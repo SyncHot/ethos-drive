@@ -285,9 +285,10 @@ class _RemoteBrowserDialog(QDialog):
         super().__init__(parent)
         self.api = api
         self.selected_path = initial_path or "/"
+        self._roots: list[dict] = []
         self._setup_ui()
-        # Load after dialog is fully constructed
-        QTimer.singleShot(100, lambda: self._load_path("/"))
+        # Load roots first, then initial path
+        QTimer.singleShot(100, self._load_roots)
 
     def _setup_ui(self):
         self.setWindowTitle("Select Remote Folder")
@@ -299,8 +300,16 @@ class _RemoteBrowserDialog(QDialog):
         layout.setSpacing(8)
 
         # Header
-        header = QLabel("Select a folder from your EthOS home directory:")
+        header = QLabel("Select a folder on your EthOS server:")
         layout.addWidget(header)
+
+        # Root selector combo
+        root_row = QHBoxLayout()
+        root_row.addWidget(QLabel("Location:"))
+        self._root_combo = QComboBox()
+        self._root_combo.currentIndexChanged.connect(self._on_root_changed)
+        root_row.addWidget(self._root_combo, 1)
+        layout.addLayout(root_row)
 
         # Current path display
         path_row = QHBoxLayout()
@@ -317,10 +326,6 @@ class _RemoteBrowserDialog(QDialog):
         self._up_btn.setEnabled(False)
         nav_row.addWidget(self._up_btn)
 
-        self._home_btn = QPushButton("Home (/)")
-        self._home_btn.clicked.connect(lambda: self._load_path("/"))
-        nav_row.addWidget(self._home_btn)
-
         self._refresh_btn = QPushButton("Refresh")
         self._refresh_btn.clicked.connect(lambda: self._load_path(self.selected_path))
         nav_row.addWidget(self._refresh_btn)
@@ -328,7 +333,7 @@ class _RemoteBrowserDialog(QDialog):
         nav_row.addStretch()
         layout.addLayout(nav_row)
 
-        # Folder list (simple QListWidget is more reliable on Windows than QTreeWidget)
+        # Folder list
         self._folder_list = QListWidget()
         self._folder_list.setAlternatingRowColors(True)
         self._folder_list.itemDoubleClicked.connect(self._on_item_double_clicked)
@@ -353,14 +358,57 @@ class _RemoteBrowserDialog(QDialog):
         btn_row.addWidget(cancel_btn)
         layout.addLayout(btn_row)
 
+    def _load_roots(self):
+        """Fetch available root locations from the server."""
+        try:
+            data = self.api.list_roots()
+            self._roots = data.get("roots", [])
+        except Exception as e:
+            log.warning("Could not load roots, falling back to home: %s", e)
+            self._roots = [{"id": "home", "name": "Home", "path": "/"}]
+
+        self._root_combo.blockSignals(True)
+        self._root_combo.clear()
+        for r in self._roots:
+            self._root_combo.addItem(r["name"], r["path"])
+        self._root_combo.blockSignals(False)
+
+        # If initial_path matches a known root, select it
+        initial = self.selected_path or "/"
+        matched_idx = 0
+        for i, r in enumerate(self._roots):
+            if initial.startswith(r["path"]):
+                matched_idx = i
+                break
+
+        self._root_combo.setCurrentIndex(matched_idx)
+        if self._roots:
+            start_path = self._roots[matched_idx]["path"]
+            self._load_path(start_path if initial == "/" else initial)
+        else:
+            self._load_path("/")
+
+    def _on_root_changed(self, index: int):
+        """Navigate to the selected root location."""
+        if 0 <= index < len(self._roots):
+            root_path = self._roots[index]["path"]
+            self._load_path(root_path)
+
     def _load_path(self, path: str):
         """Load directory contents from the server."""
         self._folder_list.clear()
         self.selected_path = path
         self._path_edit.setText(path)
-        self._up_btn.setEnabled(path != "/")
         self._status.setText("Loading...")
         self._select_btn.setEnabled(False)
+
+        # Enable up button only if we're deeper than the current root
+        current_root = "/"
+        for r in self._roots:
+            rp = r["path"].rstrip("/")
+            if path.rstrip("/").startswith(rp) and len(rp) >= len(current_root.rstrip("/")):
+                current_root = r["path"]
+        self._up_btn.setEnabled(path.rstrip("/") != current_root.rstrip("/"))
 
         # Force UI update before blocking API call
         QApplication.processEvents()
@@ -433,15 +481,25 @@ class _RemoteBrowserDialog(QDialog):
             self._path_edit.setText(path)
 
     def _go_up(self):
-        """Navigate to parent directory."""
+        """Navigate to parent directory (stop at root boundary)."""
         path = self.selected_path.rstrip("/")
+        # Find current root
+        current_root = "/"
+        for r in self._roots:
+            rp = r["path"].rstrip("/")
+            if path.startswith(rp) and len(rp) > len(current_root.rstrip("/")):
+                current_root = r["path"]
+
+        if path == current_root.rstrip("/") or path == "/":
+            return  # Already at root
+
         if "/" in path:
             parent = path.rsplit("/", 1)[0]
-            if not parent:
-                parent = "/"
+            if not parent or len(parent) < len(current_root.rstrip("/")):
+                parent = current_root
             self._load_path(parent)
         else:
-            self._load_path("/")
+            self._load_path(current_root)
 
     def _select_current(self):
         """Select the currently displayed folder."""

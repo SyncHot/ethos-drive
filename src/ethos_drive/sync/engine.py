@@ -32,6 +32,8 @@ class SyncAction:
     DOWNLOAD = "download"
     DELETE_LOCAL = "delete_local"
     DELETE_REMOTE = "delete_remote"
+    MOVE_REMOTE = "move_remote"
+    MOVE_LOCAL = "move_local"
     MKDIR_LOCAL = "mkdir_local"
     MKDIR_REMOTE = "mkdir_remote"
     CONFLICT = "conflict"
@@ -158,7 +160,47 @@ class SyncEngine(QObject):
         all_paths.update(remote_files.keys())
         all_paths.update(synced_state.keys())
 
+        # Build hash→path maps for move detection during full sync.
+        # A move looks like: synced path A gone locally + new local path B with same hash.
+        local_only_by_hash: dict[str, str] = {}   # xxhash -> path (new local files)
+        gone_local_by_hash: dict[str, str] = {}    # xxhash -> path (deleted local, still on remote)
+        moved_pairs: dict[str, str] = {}            # new_path -> old_path
+
         for path in sorted(all_paths):
+            local = local_files.get(path)
+            remote = remote_files.get(path)
+            synced = synced_state.get(path)
+            has_local = local is not None
+            has_remote = remote is not None
+            was_synced = synced is not None
+
+            # New local file (not on server, never synced) — candidate move target
+            if has_local and not has_remote and not was_synced:
+                if not local.is_dir and local.xxhash:
+                    local_only_by_hash[local.xxhash] = path
+
+            # Locally deleted, still on server, was synced — candidate move source
+            if not has_local and has_remote and was_synced:
+                h = synced.get("local_xxhash", "")
+                if h:
+                    gone_local_by_hash[h] = path
+
+        # Match moves: same xxhash in both sets
+        for h, new_path in local_only_by_hash.items():
+            old_path = gone_local_by_hash.get(h)
+            if old_path:
+                moved_pairs[new_path] = old_path
+
+        # Paths handled by moves (skip in normal classification)
+        move_handled = set()
+        for new_p, old_p in moved_pairs.items():
+            move_handled.add(new_p)
+            move_handled.add(old_p)
+            actions.append(SyncAction(SyncAction.MOVE_REMOTE, new_p, src_path=old_p))
+
+        for path in sorted(all_paths):
+            if path in move_handled:
+                continue
             if self.filter_engine.should_exclude(path):
                 continue
 
@@ -170,13 +212,15 @@ class SyncEngine(QObject):
             if action:
                 actions.append(action)
 
-        # Sort: directories first (for mkdir), then files, deletes last
+        # Sort: directories first, then moves, then files, deletes last
         def sort_key(a):
             if a.action in (SyncAction.MKDIR_LOCAL, SyncAction.MKDIR_REMOTE):
                 return (0, a.path)
+            if a.action in (SyncAction.MOVE_REMOTE, SyncAction.MOVE_LOCAL):
+                return (1, a.path)
             if a.action in (SyncAction.DELETE_LOCAL, SyncAction.DELETE_REMOTE):
-                return (2, a.path)
-            return (1, a.path)
+                return (3, a.path)
+            return (2, a.path)
 
         actions.sort(key=sort_key)
         return actions
@@ -361,6 +405,57 @@ class SyncEngine(QObject):
             self.db.log_action(self.task.id, "delete_remote", path)
             stats["deleted"] += 1
 
+        elif action.action == SyncAction.MOVE_REMOTE:
+            src_path = action.details.get("src_path", "")
+            log.info("Moving remote: %s -> %s", src_path, path)
+            remote_src = os.path.join(self.task.remote_path, src_path).replace("\\", "/")
+            remote_dst = os.path.join(self.task.remote_path, path).replace("\\", "/")
+
+            try:
+                self.api.move_remote(remote_src, remote_dst)
+            except APIError:
+                log.warning("Server move failed, falling back to upload: %s -> %s", src_path, path)
+                try:
+                    self.api.delete_remote(remote_src)
+                except APIError:
+                    pass
+                if os.path.isfile(local_abs):
+                    self.api.upload_file(local_abs, remote_dst)
+
+            self.db.mark_deleted(self.task.id, src_path)
+            fp = content_fingerprint(local_abs)
+            if fp:
+                self.db.mark_synced(self.task.id, path,
+                                    local_size=fp["size"],
+                                    local_mtime_ns=fp["mtime_ns"],
+                                    local_xxhash=fp["xxhash"],
+                                    remote_size=fp["size"],
+                                    remote_mtime_ns=fp["mtime_ns"],
+                                    remote_xxhash=fp["xxhash"])
+            self.db.log_action(self.task.id, "move_remote", path, detail=f"from {src_path}")
+
+        elif action.action == SyncAction.MOVE_LOCAL:
+            src_path = action.details.get("src_path", "")
+            src_abs = remote_to_local(src_path, self.task.local_path)
+            log.info("Moving local: %s -> %s", src_path, path)
+            if os.path.exists(src_abs):
+                os.makedirs(os.path.dirname(local_abs), exist_ok=True)
+                if self.watcher:
+                    self.watcher.suppress(src_abs, duration=10.0)
+                    self.watcher.suppress(local_abs, duration=10.0)
+                os.rename(src_abs, local_abs)
+            self.db.mark_deleted(self.task.id, src_path)
+            fp = content_fingerprint(local_abs)
+            if fp:
+                self.db.mark_synced(self.task.id, path,
+                                    local_size=fp["size"],
+                                    local_mtime_ns=fp["mtime_ns"],
+                                    local_xxhash=fp["xxhash"],
+                                    remote_size=fp["size"],
+                                    remote_mtime_ns=fp["mtime_ns"],
+                                    remote_xxhash=fp["xxhash"])
+            self.db.log_action(self.task.id, "move_local", path, detail=f"from {src_path}")
+
         elif action.action == SyncAction.MKDIR_LOCAL:
             os.makedirs(local_abs, exist_ok=True)
             self.db.upsert_file(self.task.id, path, is_dir=1, status="synced")
@@ -413,7 +508,44 @@ class SyncEngine(QObject):
                 continue
 
             try:
-                if action in ("created", "modified"):
+                if action == "moved":
+                    src_path = change.get("src_path", "")
+                    dst_path = path
+                    abs_path = change.get("abs_path", remote_to_local(dst_path, self.task.local_path))
+
+                    remote_src = os.path.join(self.task.remote_path, src_path).replace("\\", "/")
+                    remote_dst = os.path.join(self.task.remote_path, dst_path).replace("\\", "/")
+
+                    try:
+                        self.api.move_remote(remote_src, remote_dst)
+                    except APIError:
+                        # Server move failed — fall back to delete + upload
+                        log.warning("Server-side move failed, falling back to upload: %s -> %s", src_path, dst_path)
+                        self.api.delete_remote(remote_src)
+                        if os.path.isfile(abs_path):
+                            self.api.upload_file(abs_path, remote_dst)
+
+                    # Update state DB: remove old path, add new
+                    self.db.mark_deleted(self.task.id, src_path)
+                    if os.path.isfile(abs_path):
+                        fp = content_fingerprint(abs_path)
+                        if fp:
+                            self.db.mark_synced(self.task.id, dst_path,
+                                                local_size=fp["size"],
+                                                local_mtime_ns=fp["mtime_ns"],
+                                                local_xxhash=fp["xxhash"],
+                                                remote_size=fp["size"],
+                                                remote_mtime_ns=fp["mtime_ns"],
+                                                remote_xxhash=fp["xxhash"])
+                    elif os.path.isdir(abs_path):
+                        self.db.upsert_file(self.task.id, dst_path, is_dir=1, status="synced")
+                        # For directory moves, update all children paths in state DB
+                        self._update_children_paths(src_path, dst_path)
+
+                    self.db.log_action(self.task.id, "move_remote", dst_path,
+                                       detail=f"from {src_path}")
+
+                elif action in ("created", "modified"):
                     abs_path = change.get("abs_path", remote_to_local(path, self.task.local_path))
                     if os.path.isfile(abs_path):
                         remote_path = os.path.join(self.task.remote_path, path).replace("\\", "/")
@@ -461,7 +593,31 @@ class SyncEngine(QObject):
             local_abs = remote_to_local(path, self.task.local_path)
 
             try:
-                if action in ("created", "modified"):
+                if action == "moved":
+                    # Server-side move — replicate locally
+                    src_rel = change.get("src_path", "")
+                    if src_rel.startswith(self.task.remote_path):
+                        src_rel = os.path.relpath(src_rel, self.task.remote_path).replace("\\", "/")
+                    src_abs = remote_to_local(src_rel, self.task.local_path)
+                    if os.path.exists(src_abs):
+                        os.makedirs(os.path.dirname(local_abs), exist_ok=True)
+                        if self.watcher:
+                            self.watcher.suppress(src_abs, duration=10.0)
+                            self.watcher.suppress(local_abs, duration=10.0)
+                        os.rename(src_abs, local_abs)
+                    self.db.mark_deleted(self.task.id, src_rel)
+                    fp = content_fingerprint(local_abs) if os.path.isfile(local_abs) else None
+                    if fp:
+                        self.db.mark_synced(self.task.id, path,
+                                            local_size=fp["size"],
+                                            local_mtime_ns=fp["mtime_ns"],
+                                            local_xxhash=fp["xxhash"],
+                                            remote_size=change.get("size", fp["size"]),
+                                            remote_mtime_ns=change.get("mtime_ns", fp["mtime_ns"]),
+                                            remote_xxhash=change.get("xxhash", fp["xxhash"]))
+                    self.db.log_action(self.task.id, "move_local", path, detail=f"from {src_rel}")
+
+                elif action in ("created", "modified"):
                     remote_full = os.path.join(self.task.remote_path, path).replace("\\", "/")
                     # Suppress watcher to prevent re-upload loop
                     if self.watcher:
@@ -495,3 +651,24 @@ class SyncEngine(QObject):
         """Cancel ongoing sync."""
         self._cancelled = True
         self.transfer_mgr.cancel_all()
+
+    def _update_children_paths(self, old_parent: str, new_parent: str):
+        """After a directory move, update all child paths in the state DB."""
+        all_files = self.db.get_all_files(self.task.id)
+        old_prefix = old_parent.rstrip("/") + "/"
+        for f in all_files:
+            if f["path"].startswith(old_prefix):
+                old_child = f["path"]
+                new_child = new_parent.rstrip("/") + "/" + old_child[len(old_prefix):]
+                self.db.mark_deleted(self.task.id, old_child)
+                self.db.upsert_file(
+                    self.task.id, new_child,
+                    is_dir=f.get("is_dir", 0),
+                    local_size=f.get("local_size"),
+                    local_mtime_ns=f.get("local_mtime_ns"),
+                    local_xxhash=f.get("local_xxhash"),
+                    remote_size=f.get("remote_size"),
+                    remote_mtime_ns=f.get("remote_mtime_ns"),
+                    remote_xxhash=f.get("remote_xxhash"),
+                    status="synced",
+                )

@@ -47,8 +47,45 @@ class _EventCollector(FileSystemEventHandler):
         self._record(event.src_path, "deleted", event.is_directory)
 
     def on_moved(self, event):
-        self._record(event.src_path, "deleted", event.is_directory)
-        self._record(event.dest_path, "created", event.is_directory)
+        src_rel = local_to_remote(event.src_path, self.root)
+        dst_rel = local_to_remote(event.dest_path, self.root)
+        # Record as a proper move so the engine can use server-side rename
+        name = os.path.basename(event.dest_path)
+        if not self.sync_hidden and is_hidden(event.dest_path):
+            # Destination is hidden — treat as delete of source only
+            self._record(event.src_path, "deleted", event.is_directory)
+            return
+        if not self.sync_hidden and is_hidden(event.src_path):
+            # Source was hidden — treat as create at destination only
+            self._record(event.dest_path, "created", event.is_directory)
+            return
+        if name.endswith((".ethos-tmp", ".ethos-conflict", ".partial")):
+            return
+
+        norm_src = os.path.normpath(event.src_path)
+        norm_dst = os.path.normpath(event.dest_path)
+        with self._lock:
+            # Check suppression on both paths
+            now = time.time()
+            until_s = self._suppressed.get(norm_src)
+            until_d = self._suppressed.get(norm_dst)
+            if (until_s and now < until_s) or (until_d and now < until_d):
+                return
+
+            # Remove any pending events for old/new paths (superseded by move)
+            self._pending.pop(src_rel, None)
+            self._pending.pop(dst_rel, None)
+
+            # Store as a "moved" action keyed by destination
+            self._pending[dst_rel] = {
+                "action": "moved",
+                "path": dst_rel,
+                "src_path": src_rel,
+                "abs_path": event.dest_path,
+                "src_abs_path": event.src_path,
+                "is_dir": event.is_directory,
+                "time": now,
+            }
 
     def _record(self, abs_path: str, action: str, is_dir: bool):
         """Record a change with debouncing."""
