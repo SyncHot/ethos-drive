@@ -76,6 +76,9 @@ if not exist "venv" (
 REM --- Activate venv ---
 call venv\Scripts\activate.bat
 
+REM After activation, venv python is in PATH — use it directly
+set "PYTHON=python"
+
 REM --- Install dependencies ---
 echo Installing dependencies...
 pip install --quiet -r requirements.txt
