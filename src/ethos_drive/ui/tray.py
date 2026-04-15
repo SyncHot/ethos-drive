@@ -31,25 +31,34 @@ STATUS_LABELS = {
 
 
 def _create_status_icon(color_hex: str, size: int = 64) -> QIcon:
-    """Generate a tray icon: white 'E' on colored rounded-rect background."""
+    """Generate a tray icon: white 'E' on colored solid background.
+
+    Windows 11 system tray requires non-transparent icons for reliable display.
+    We paint a solid colored square with rounded corners and a white 'E'.
+    """
     pixmap = QPixmap(size, size)
-    pixmap.fill(QColor(0, 0, 0, 0))
+    # Solid black fill first (no transparency — Windows tray needs this)
+    pixmap.fill(QColor(0, 0, 0, 255))
+
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    # Rounded rectangle background
+    # Full-size colored background (solid, no transparency)
     bg = QColor(color_hex)
     painter.setBrush(bg)
     painter.setPen(Qt.NoPen)
-    r = size // 6
-    painter.drawRoundedRect(2, 2, size - 4, size - 4, r, r)
+    painter.drawRect(0, 0, size, size)
 
     # White 'E' letter
     painter.setPen(QPen(QColor("#FFFFFF")))
-    font = QFont("Segoe UI", int(size * 0.55), QFont.Weight.Bold)
+    font = QFont()
+    font.setFamily("Arial")
+    font.setPixelSize(int(size * 0.65))
+    font.setBold(True)
     painter.setFont(font)
     painter.drawText(pixmap.rect(), Qt.AlignCenter, "E")
     painter.end()
+
     return QIcon(pixmap)
 
 
@@ -59,7 +68,11 @@ class SystemTray(QSystemTrayIcon):
     def __init__(self, app: "EthosDriveApp"):
         super().__init__()
         self.drive_app = app
-        self._status_icons = {k: _create_status_icon(v) for k, v in STATUS_COLORS.items()}
+        self._status_icons = {k: _create_status_icon(v, 32) for k, v in STATUS_COLORS.items()}
+
+        # Set icon BEFORE building menu and showing
+        self.setIcon(self._status_icons["offline"])
+        self.setToolTip("EthOS Drive")
 
         self._build_menu()
         self._update_status("offline")
