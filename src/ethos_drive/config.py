@@ -55,7 +55,7 @@ class Config(BaseModel):
     start_minimized: bool = True
     auto_start: bool = True
     mount_as_drive: bool = True
-    drive_letter: str = ""  # auto-detect if empty
+    drive_letter: str = ""  # deprecated — kept for config compat
     log_level: str = "INFO"
     auto_update: bool = True
     max_concurrent_transfers: int = 3

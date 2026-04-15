@@ -100,31 +100,27 @@ class EthosDriveApp(QObject):
         return folder
 
     def _mount_drive(self):
-        """Mount sync folder as a Windows drive letter."""
+        """Add EthOS Drive shortcut to Explorer navigation pane."""
         if not self.config.mount_as_drive or os.name != "nt":
             return
         try:
-            from ethos_drive.platform.windows import mount_virtual_drive, setup_virtual_drive_on_boot
+            from ethos_drive.platform.windows import add_explorer_shortcut
             folder = self._get_sync_folder()
-            letter = mount_virtual_drive(folder, self.config.drive_letter)
-            if letter:
-                self._mounted_drive = letter
-                self.config.drive_letter = letter
-                self.config.save()
-                setup_virtual_drive_on_boot(folder, letter)
-                log.info("Virtual drive %s: -> %s", letter, folder)
+            if add_explorer_shortcut(folder):
+                self._mounted_drive = "nav"  # flag that shortcut is active
+                log.info("Explorer shortcut added -> %s", folder)
         except Exception as e:
-            log.error("Failed to mount virtual drive: %s", e)
+            log.error("Failed to add Explorer shortcut: %s", e)
 
     def _unmount_drive(self):
-        """Unmount the virtual drive."""
+        """Remove EthOS Drive shortcut from Explorer."""
         if self._mounted_drive:
             try:
-                from ethos_drive.platform.windows import unmount_virtual_drive
-                unmount_virtual_drive(self._mounted_drive)
+                from ethos_drive.platform.windows import remove_explorer_shortcut
+                remove_explorer_shortcut()
                 self._mounted_drive = ""
             except Exception as e:
-                log.error("Failed to unmount drive: %s", e)
+                log.error("Failed to remove Explorer shortcut: %s", e)
 
     def _apply_auto_start(self):
         """Apply auto-start registry setting."""

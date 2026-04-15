@@ -192,33 +192,17 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(gen_group)
 
-        # Virtual drive settings
-        drive_group = QGroupBox("Virtual Drive")
+        # Explorer integration
+        drive_group = QGroupBox("Explorer Integration")
         drive_form = QFormLayout(drive_group)
 
-        self._mount_drive_cb = QCheckBox("Show EthOS Drive as a drive in Explorer")
+        self._mount_drive_cb = QCheckBox("Show EthOS Drive in Explorer sidebar")
         self._mount_drive_cb.setChecked(self.drive_app.config.mount_as_drive)
         self._mount_drive_cb.toggled.connect(self._on_mount_drive_changed)
         drive_form.addRow(self._mount_drive_cb)
 
-        drive_letter_row = QHBoxLayout()
-        drive_letter_row.addWidget(QLabel("Drive letter:"))
-        self._drive_letter_combo = QComboBox()
-        self._drive_letter_combo.addItem("Auto", "")
-        for ch in "EFGHIJKLMNOPQRSTUVWXYZDB":
-            self._drive_letter_combo.addItem(f"{ch}:", ch)
-        current = self.drive_app.config.drive_letter
-        if current:
-            idx = self._drive_letter_combo.findData(current)
-            if idx >= 0:
-                self._drive_letter_combo.setCurrentIndex(idx)
-        self._drive_letter_combo.currentIndexChanged.connect(self._save_settings)
-        drive_letter_row.addWidget(self._drive_letter_combo)
-        drive_letter_row.addStretch()
-        drive_form.addRow(drive_letter_row)
-
         if self.drive_app._mounted_drive:
-            mounted_label = QLabel(f"✓ Currently mounted as {self.drive_app._mounted_drive}:")
+            mounted_label = QLabel("✓ Visible in Explorer navigation pane")
             mounted_label.setStyleSheet("color: #4CAF50;")
             drive_form.addRow(mounted_label)
 
@@ -379,7 +363,6 @@ class MainWindow(QMainWindow):
         cfg.start_minimized = self._start_min_cb.isChecked()
         cfg.show_notifications = self._notify_cb.isChecked()
         cfg.mount_as_drive = self._mount_drive_cb.isChecked()
-        cfg.drive_letter = self._drive_letter_combo.currentData() or ""
         cfg.auto_update = self._auto_update_cb.isChecked()
         cfg.max_concurrent_transfers = self._max_transfers.value()
         cfg.log_level = self._log_level.currentText()
@@ -395,8 +378,6 @@ class MainWindow(QMainWindow):
             self.drive_app._mount_drive()
         else:
             self.drive_app._unmount_drive()
-            from ethos_drive.platform.windows import remove_virtual_drive_on_boot
-            remove_virtual_drive_on_boot()
 
     def _reconnect(self):
         self.drive_app.disconnect()
