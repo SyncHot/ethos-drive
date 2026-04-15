@@ -107,14 +107,19 @@ echo.
 %PYTHON% -m PyInstaller ^
     --name "EthOS Drive" ^
     --windowed ^
-    --onedir ^
+    --onefile ^
     --icon "src\resources\icons\ethos-drive.ico" ^
     --add-data "src\resources\icons;resources\icons" ^
     --hidden-import "PySide6.QtSvg" ^
     --hidden-import "PySide6.QtNetwork" ^
+    --hidden-import "PySide6.QtWidgets" ^
+    --hidden-import "PySide6.QtCore" ^
+    --hidden-import "PySide6.QtGui" ^
     --hidden-import "engineio.async_drivers.threading" ^
     --hidden-import "socketio" ^
     --hidden-import "httpx" ^
+    --hidden-import "httpx._transports" ^
+    --hidden-import "httpcore" ^
     --hidden-import "xxhash" ^
     --hidden-import "keyring" ^
     --hidden-import "keyring.backends" ^
@@ -122,6 +127,8 @@ echo.
     --hidden-import "watchdog" ^
     --hidden-import "watchdog.observers" ^
     --hidden-import "pydantic" ^
+    --hidden-import "pydantic.deprecated.decorator" ^
+    --collect-all "PySide6" ^
     --collect-all "ethos_drive" ^
     --paths "src" ^
     --noconfirm ^
@@ -137,7 +144,7 @@ if errorlevel 1 (
 echo.
 echo ========================================
 echo  BUILD SUCCESSFUL
-echo  Output: dist\EthOS Drive\EthOS Drive.exe
+echo  Output: dist\EthOS Drive.exe
 echo ========================================
 echo.
 
