@@ -153,37 +153,80 @@ class MainWindow(QMainWindow):
         self._user_label = QLabel(self.drive_app.config.username or "—")
         conn_form.addRow("Username:", self._user_label)
 
+        reconnect_btn = QPushButton("Change Server...")
+        reconnect_btn.clicked.connect(self._reconnect)
         disconnect_btn = QPushButton("Disconnect")
         disconnect_btn.clicked.connect(self._disconnect)
-        conn_form.addRow("", disconnect_btn)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(reconnect_btn)
+        btn_row.addWidget(disconnect_btn)
+        conn_form.addRow("", btn_row)
         layout.addWidget(conn_group)
 
         # General settings
         gen_group = QGroupBox("General")
         gen_form = QFormLayout(gen_group)
 
-        self._auto_start_cb = QCheckBox()
+        self._auto_start_cb = QCheckBox("Launch EthOS Drive when Windows starts")
         self._auto_start_cb.setChecked(self.drive_app.config.auto_start)
-        self._auto_start_cb.toggled.connect(self._save_settings)
-        gen_form.addRow("Start with Windows:", self._auto_start_cb)
+        self._auto_start_cb.toggled.connect(self._on_auto_start_changed)
+        gen_form.addRow(self._auto_start_cb)
 
-        self._start_min_cb = QCheckBox()
+        self._start_min_cb = QCheckBox("Start minimized to tray")
         self._start_min_cb.setChecked(self.drive_app.config.start_minimized)
         self._start_min_cb.toggled.connect(self._save_settings)
-        gen_form.addRow("Start minimized:", self._start_min_cb)
+        gen_form.addRow(self._start_min_cb)
 
-        self._notify_cb = QCheckBox()
+        self._notify_cb = QCheckBox("Show sync notifications")
         self._notify_cb.setChecked(self.drive_app.config.show_notifications)
         self._notify_cb.toggled.connect(self._save_settings)
-        gen_form.addRow("Show notifications:", self._notify_cb)
+        gen_form.addRow(self._notify_cb)
+
+        layout.addWidget(gen_group)
+
+        # Virtual drive settings
+        drive_group = QGroupBox("Virtual Drive")
+        drive_form = QFormLayout(drive_group)
+
+        self._mount_drive_cb = QCheckBox("Show EthOS Drive as a drive in Explorer")
+        self._mount_drive_cb.setChecked(self.drive_app.config.mount_as_drive)
+        self._mount_drive_cb.toggled.connect(self._on_mount_drive_changed)
+        drive_form.addRow(self._mount_drive_cb)
+
+        drive_letter_row = QHBoxLayout()
+        drive_letter_row.addWidget(QLabel("Drive letter:"))
+        self._drive_letter_combo = QComboBox()
+        self._drive_letter_combo.addItem("Auto", "")
+        for ch in "EFGHIJKLMNOPQRSTUVWXYZDB":
+            self._drive_letter_combo.addItem(f"{ch}:", ch)
+        current = self.drive_app.config.drive_letter
+        if current:
+            idx = self._drive_letter_combo.findData(current)
+            if idx >= 0:
+                self._drive_letter_combo.setCurrentIndex(idx)
+        self._drive_letter_combo.currentIndexChanged.connect(self._save_settings)
+        drive_letter_row.addWidget(self._drive_letter_combo)
+        drive_letter_row.addStretch()
+        drive_form.addRow(drive_letter_row)
+
+        if self.drive_app._mounted_drive:
+            mounted_label = QLabel(f"✓ Currently mounted as {self.drive_app._mounted_drive}:")
+            mounted_label.setStyleSheet("color: #4CAF50;")
+            drive_form.addRow(mounted_label)
+
+        layout.addWidget(drive_group)
+
+        # Transfer settings
+        transfer_group = QGroupBox("Transfers")
+        transfer_form = QFormLayout(transfer_group)
 
         self._max_transfers = QSpinBox()
         self._max_transfers.setRange(1, 10)
         self._max_transfers.setValue(self.drive_app.config.max_concurrent_transfers)
         self._max_transfers.valueChanged.connect(self._save_settings)
-        gen_form.addRow("Max concurrent transfers:", self._max_transfers)
+        transfer_form.addRow("Max concurrent transfers:", self._max_transfers)
 
-        layout.addWidget(gen_group)
+        layout.addWidget(transfer_group)
 
         # Log level
         log_group = QGroupBox("Logging")
@@ -275,9 +318,28 @@ class MainWindow(QMainWindow):
         cfg.auto_start = self._auto_start_cb.isChecked()
         cfg.start_minimized = self._start_min_cb.isChecked()
         cfg.show_notifications = self._notify_cb.isChecked()
+        cfg.mount_as_drive = self._mount_drive_cb.isChecked()
+        cfg.drive_letter = self._drive_letter_combo.currentData() or ""
         cfg.max_concurrent_transfers = self._max_transfers.value()
         cfg.log_level = self._log_level.currentText()
         cfg.save()
+
+    def _on_auto_start_changed(self, enabled: bool):
+        self._save_settings()
+        self.drive_app._apply_auto_start()
+
+    def _on_mount_drive_changed(self, enabled: bool):
+        self._save_settings()
+        if enabled:
+            self.drive_app._mount_drive()
+        else:
+            self.drive_app._unmount_drive()
+            from ethos_drive.platform.windows import remove_virtual_drive_on_boot
+            remove_virtual_drive_on_boot()
+
+    def _reconnect(self):
+        self.drive_app.disconnect()
+        self.drive_app.show_login()
 
     def show_activity_tab(self):
         self._tabs.setCurrentWidget(self._activity_widget)

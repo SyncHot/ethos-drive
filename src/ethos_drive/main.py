@@ -27,8 +27,10 @@ def main():
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
+    start_minimized = "--minimized" in sys.argv
+
     drive_app = EthosDriveApp()
-    drive_app.start()
+    drive_app.start(minimized=start_minimized)
 
     sys.exit(app.exec())
 

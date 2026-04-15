@@ -1,6 +1,7 @@
 """EthOS Drive application singleton — coordinates all components."""
 
 import logging
+import os
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal, QTimer
@@ -34,6 +35,7 @@ class EthosDriveApp(QObject):
         self.tray: Optional[SystemTray] = None
         self._status = "offline"
         self._paused = False
+        self._mounted_drive = ""
 
         self._sync_timer = QTimer()
         self._sync_timer.timeout.connect(self._periodic_sync)
@@ -49,7 +51,7 @@ class EthosDriveApp(QObject):
             self.status_changed.emit(value)
             log.info("App status: %s", value)
 
-    def start(self):
+    def start(self, minimized: bool = False):
         """Initialize and start the application."""
         log.info("EthOS Drive v%s starting", "1.0.0")
 
@@ -58,7 +60,7 @@ class EthosDriveApp(QObject):
 
         if self.config.server_url and self.config.has_credentials():
             self._connect()
-        else:
+        elif not minimized:
             # First launch or no saved credentials — show login dialog
             self.show_login()
 
@@ -76,6 +78,52 @@ class EthosDriveApp(QObject):
         """Handle successful login from dialog."""
         log.info("Login successful for %s@%s", username, server_url)
         self._connect()
+
+    def _get_sync_folder(self) -> str:
+        """Get the main sync folder path. Uses first task's local_path or default."""
+        if self.config.sync_tasks:
+            return self.config.sync_tasks[0].local_path
+        from ethos_drive.platform.windows import get_default_sync_folder
+        folder = get_default_sync_folder()
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
+    def _mount_drive(self):
+        """Mount sync folder as a Windows drive letter."""
+        if not self.config.mount_as_drive or os.name != "nt":
+            return
+        try:
+            from ethos_drive.platform.windows import mount_virtual_drive, setup_virtual_drive_on_boot
+            folder = self._get_sync_folder()
+            letter = mount_virtual_drive(folder, self.config.drive_letter)
+            if letter:
+                self._mounted_drive = letter
+                self.config.drive_letter = letter
+                self.config.save()
+                setup_virtual_drive_on_boot(folder, letter)
+                log.info("Virtual drive %s: -> %s", letter, folder)
+        except Exception as e:
+            log.error("Failed to mount virtual drive: %s", e)
+
+    def _unmount_drive(self):
+        """Unmount the virtual drive."""
+        if self._mounted_drive:
+            try:
+                from ethos_drive.platform.windows import unmount_virtual_drive
+                unmount_virtual_drive(self._mounted_drive)
+                self._mounted_drive = ""
+            except Exception as e:
+                log.error("Failed to unmount drive: %s", e)
+
+    def _apply_auto_start(self):
+        """Apply auto-start registry setting."""
+        if os.name != "nt":
+            return
+        try:
+            from ethos_drive.platform.windows import set_auto_start
+            set_auto_start(self.config.auto_start)
+        except Exception as e:
+            log.error("Auto-start setting failed: %s", e)
 
     def _connect(self):
         """Connect to EthOS server."""
@@ -112,6 +160,12 @@ class EthosDriveApp(QObject):
 
             self.status = "idle"
             log.info("Connected to %s", self.config.server_url)
+
+            # Mount virtual drive if enabled
+            self._mount_drive()
+
+            # Apply auto-start setting
+            self._apply_auto_start()
 
             # Do initial full sync
             self.sync_all()
@@ -251,6 +305,7 @@ class EthosDriveApp(QObject):
     def quit(self):
         """Shut down the application."""
         log.info("EthOS Drive shutting down")
+        self._unmount_drive()
         self.disconnect()
         self.state_db.close()
         from PySide6.QtWidgets import QApplication

@@ -1,8 +1,10 @@
-"""Windows-specific integration — auto-start, notifications, shell extensions."""
+"""Windows-specific integration — auto-start, virtual drive, notifications, shell."""
 
 import logging
 import os
+import subprocess
 import sys
+import string
 
 log = logging.getLogger(__name__)
 
@@ -19,11 +21,11 @@ def set_auto_start(enabled: bool):
 
         if enabled:
             if getattr(sys, "frozen", False):
-                exe_path = sys.executable
+                exe_path = f'"{sys.executable}" --minimized'
             else:
-                exe_path = f'"{sys.executable}" -m ethos_drive'
+                exe_path = f'"{sys.executable}" -m ethos_drive --minimized'
             winreg.SetValueEx(key, "EthOS Drive", 0, winreg.REG_SZ, exe_path)
-            log.info("Auto-start enabled")
+            log.info("Auto-start enabled: %s", exe_path)
         else:
             try:
                 winreg.DeleteValue(key, "EthOS Drive")
@@ -62,19 +64,177 @@ def get_default_sync_folder() -> str:
     return os.path.join(home, "EthOS Drive")
 
 
-def show_windows_notification(title: str, message: str, icon_path: str = None):
-    """Show a Windows 10/11 toast notification."""
+# ─── Virtual drive mapping ─────────────────────────────────────
+
+def _get_used_drive_letters() -> set[str]:
+    """Return set of drive letters currently in use (e.g. {'C', 'D'})."""
+    used = set()
     if os.name != "nt":
-        return
+        return used
+    for letter in string.ascii_uppercase:
+        if os.path.exists(f"{letter}:\\"):
+            used.add(letter)
+    return used
+
+
+def _find_free_drive_letter(preferred: str = "E") -> str:
+    """Find a free drive letter, preferring the given letter."""
+    used = _get_used_drive_letters()
+    preferred = preferred.upper()
+    if preferred not in used:
+        return preferred
+    # Try E-Z, then D-B (skip A: floppy, C: system)
+    for letter in "EFGHIJKLMNOPQRSTUVWXYZDB":
+        if letter not in used:
+            return letter
+    return ""
+
+
+def mount_virtual_drive(folder_path: str, drive_letter: str = "") -> str:
+    """Map a local folder as a Windows drive letter using subst.
+    Returns the drive letter used, or '' on failure.
+    """
+    if os.name != "nt":
+        return ""
+
+    folder_path = os.path.abspath(folder_path)
+    os.makedirs(folder_path, exist_ok=True)
+
+    if not drive_letter:
+        drive_letter = _find_free_drive_letter("E")
+    if not drive_letter:
+        log.error("No free drive letter available")
+        return ""
+
+    drive_letter = drive_letter.upper()
+
+    # Check if already mounted
+    if os.path.exists(f"{drive_letter}:\\"):
+        # Verify it points to our folder
+        try:
+            result = subprocess.run(
+                ["subst"], capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.splitlines():
+                if line.startswith(f"{drive_letter}:\\") and folder_path.lower() in line.lower():
+                    log.info("Drive %s: already mapped to %s", drive_letter, folder_path)
+                    return drive_letter
+        except Exception:
+            pass
+        # In use by something else — find another letter
+        drive_letter = _find_free_drive_letter()
+        if not drive_letter:
+            return ""
 
     try:
-        from PySide6.QtWidgets import QSystemTrayIcon
-        # Use Qt's tray notification (cross-platform)
-        # This is handled by the SystemTray class
-        pass
-    except Exception as e:
-        log.debug("Notification failed: %s", e)
+        subprocess.run(
+            ["subst", f"{drive_letter}:", folder_path],
+            check=True, capture_output=True, timeout=10,
+        )
+        log.info("Mounted %s as %s:", folder_path, drive_letter)
 
+        # Set custom label in registry so Explorer shows "EthOS Drive (E:)"
+        _set_drive_label(drive_letter, "EthOS Drive")
+        # Set drive icon
+        _set_drive_icon(drive_letter)
+
+        return drive_letter
+    except subprocess.CalledProcessError as e:
+        log.error("subst failed: %s", e.stderr)
+        return ""
+    except Exception as e:
+        log.error("Mount failed: %s", e)
+        return ""
+
+
+def unmount_virtual_drive(drive_letter: str):
+    """Unmap a virtual drive."""
+    if os.name != "nt" or not drive_letter:
+        return
+    try:
+        subprocess.run(
+            ["subst", f"{drive_letter}:", "/d"],
+            check=True, capture_output=True, timeout=10,
+        )
+        _remove_drive_label(drive_letter)
+        log.info("Unmounted drive %s:", drive_letter)
+    except Exception as e:
+        log.debug("Unmount %s: %s", drive_letter, e)
+
+
+def _set_drive_label(letter: str, label: str):
+    """Set a custom label for a drive in the registry (shows in Explorer)."""
+    try:
+        import winreg
+        key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}\DefaultLabel"
+        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, label)
+        winreg.CloseKey(key)
+    except Exception as e:
+        log.debug("Drive label failed: %s", e)
+
+
+def _remove_drive_label(letter: str):
+    """Remove custom drive label."""
+    try:
+        import winreg
+        key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}\DefaultLabel"
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+        key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}"
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+    except Exception:
+        pass
+
+
+def _set_drive_icon(letter: str):
+    """Set a custom icon for the drive in Explorer."""
+    try:
+        import winreg
+        # Use the exe icon if frozen, otherwise skip
+        if not getattr(sys, "frozen", False):
+            return
+        icon_path = sys.executable
+        key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}\DefaultIcon"
+        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"{icon_path},0")
+        winreg.CloseKey(key)
+    except Exception as e:
+        log.debug("Drive icon failed: %s", e)
+
+
+def setup_virtual_drive_on_boot(folder_path: str, drive_letter: str):
+    """Ensure the virtual drive is re-created on login (subst doesn't persist reboots).
+    Adds a RunOnce registry entry or uses the auto-start to handle it.
+    """
+    if os.name != "nt" or not drive_letter:
+        return
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+        cmd = f'subst {drive_letter}: "{os.path.abspath(folder_path)}"'
+        winreg.SetValueEx(key, "EthOS Drive Map", 0, winreg.REG_SZ, cmd)
+        winreg.CloseKey(key)
+        log.info("Virtual drive %s: will persist across reboots", drive_letter)
+    except Exception as e:
+        log.error("Failed to persist drive mapping: %s", e)
+
+
+def remove_virtual_drive_on_boot():
+    """Remove the persistent drive mapping."""
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+        winreg.DeleteValue(key, "EthOS Drive Map")
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
+# ─── Explorer context menu ─────────────────────────────────────
 
 def add_to_explorer_context_menu():
     """Add 'Sync with EthOS' to Windows Explorer right-click context menu."""
@@ -116,3 +276,13 @@ def remove_explorer_context_menu():
         log.info("Explorer context menu removed")
     except Exception as e:
         log.debug("Context menu removal: %s", e)
+
+
+def show_windows_notification(title: str, message: str, icon_path: str = None):
+    """Show a Windows 10/11 toast notification."""
+    if os.name != "nt":
+        return
+    try:
+        pass  # Handled by SystemTray's showMessage()
+    except Exception as e:
+        log.debug("Notification failed: %s", e)

@@ -54,6 +54,8 @@ class Config(BaseModel):
     show_notifications: bool = True
     start_minimized: bool = True
     auto_start: bool = True
+    mount_as_drive: bool = True
+    drive_letter: str = ""  # auto-detect if empty
     log_level: str = "INFO"
     max_concurrent_transfers: int = 3
     chunk_size_kb: int = 4096  # 4 MB chunks
