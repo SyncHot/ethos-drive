@@ -34,12 +34,23 @@ class _LoginWorker(QThread):
             if token:
                 self.finished.emit(True, token)
             else:
-                self.finished.emit(False, "Login failed — invalid credentials")
+                self.finished.emit(False, "Login failed — server returned no token. Check credentials.")
             client.close()
         except APIError as e:
-            self.finished.emit(False, str(e))
+            if e.status_code == 401:
+                self.finished.emit(False, "Invalid username or password.")
+            else:
+                self.finished.emit(False, str(e))
         except Exception as e:
-            self.finished.emit(False, f"Connection error: {e}")
+            err = str(e)
+            # Suggest HTTP if HTTPS connection failed
+            if "https://" in self.server_url and ("SSL" in err or "CERTIFICATE" in err.upper()
+                                                   or "Connect" in err or "timed out" in err.lower()):
+                self.finished.emit(False,
+                    f"Connection failed. If your server uses HTTP, change the address to:\n"
+                    f"http://{self.server_url.replace('https://', '')}\n\nError: {err}")
+            else:
+                self.finished.emit(False, f"Connection error: {err}")
 
 
 class LoginDialog(QDialog):
@@ -76,7 +87,7 @@ class LoginDialog(QDialog):
         # Server URL
         layout.addWidget(QLabel("Server Address:"))
         self._server_input = QLineEdit()
-        self._server_input.setPlaceholderText("https://your-ethos-server:9000")
+        self._server_input.setPlaceholderText("192.168.1.100:9000 or my-nas.local:9000")
         self._server_input.setText(self.config.server_url)
         layout.addWidget(self._server_input)
 
@@ -136,9 +147,16 @@ class LoginDialog(QDialog):
             QMessageBox.warning(self, "Error", "Please enter a password.")
             return
 
-        # Ensure URL has scheme
+        # Ensure URL has scheme — default to http for LAN IPs, https for domains
         if not server.startswith(("http://", "https://")):
-            server = "https://" + server
+            # LAN addresses are almost always plain HTTP
+            host_part = server.split(":")[0].split("/")[0]
+            is_ip = host_part.replace(".", "").isdigit()
+            is_local = host_part in ("localhost", "127.0.0.1") or host_part.endswith(".local")
+            if is_ip or is_local:
+                server = "http://" + server
+            else:
+                server = "https://" + server
 
         self._connect_btn.setEnabled(False)
         self._progress.show()
@@ -154,7 +172,13 @@ class LoginDialog(QDialog):
         if success:
             server = self._server_input.text().strip()
             if not server.startswith(("http://", "https://")):
-                server = "https://" + server
+                host_part = server.split(":")[0].split("/")[0]
+                is_ip = host_part.replace(".", "").isdigit()
+                is_local = host_part in ("localhost", "127.0.0.1") or host_part.endswith(".local")
+                if is_ip or is_local:
+                    server = "http://" + server
+                else:
+                    server = "https://" + server
             username = self._username_input.text().strip()
 
             # Save credentials
