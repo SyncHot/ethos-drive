@@ -58,9 +58,24 @@ class EthosDriveApp(QObject):
 
         if self.config.server_url and self.config.has_credentials():
             self._connect()
+        else:
+            # First launch or no saved credentials — show login dialog
+            self.show_login()
 
         # Periodic full sync every 5 minutes as safety net
         self._sync_timer.start(5 * 60 * 1000)
+
+    def show_login(self):
+        """Show the login dialog."""
+        from ethos_drive.ui.login import LoginDialog
+        dlg = LoginDialog(self.config)
+        dlg.login_successful.connect(self._on_login_success)
+        dlg.exec()
+
+    def _on_login_success(self, server_url: str, username: str, token: str):
+        """Handle successful login from dialog."""
+        log.info("Login successful for %s@%s", username, server_url)
+        self._connect()
 
     def _connect(self):
         """Connect to EthOS server."""

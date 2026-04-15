@@ -4,8 +4,8 @@ import logging
 from typing import TYPE_CHECKING
 
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction
-from PySide6.QtCore import QTimer
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPen, QAction
+from PySide6.QtCore import Qt
 
 if TYPE_CHECKING:
     from ethos_drive.app import EthosDriveApp
@@ -31,15 +31,24 @@ STATUS_LABELS = {
 
 
 def _create_status_icon(color_hex: str, size: int = 64) -> QIcon:
-    """Generate a simple colored circle icon for the tray."""
+    """Generate a tray icon: white 'E' on colored rounded-rect background."""
     pixmap = QPixmap(size, size)
     pixmap.fill(QColor(0, 0, 0, 0))
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(QColor(color_hex))
-    painter.setPen(QColor(color_hex).darker(120))
-    margin = size // 8
-    painter.drawEllipse(margin, margin, size - 2 * margin, size - 2 * margin)
+
+    # Rounded rectangle background
+    bg = QColor(color_hex)
+    painter.setBrush(bg)
+    painter.setPen(Qt.NoPen)
+    r = size // 6
+    painter.drawRoundedRect(2, 2, size - 4, size - 4, r, r)
+
+    # White 'E' letter
+    painter.setPen(QPen(QColor("#FFFFFF")))
+    font = QFont("Segoe UI", int(size * 0.55), QFont.Weight.Bold)
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, "E")
     painter.end()
     return QIcon(pixmap)
 
@@ -67,6 +76,10 @@ class SystemTray(QSystemTrayIcon):
         self._status_label.setEnabled(False)
         menu.addAction(self._status_label)
         menu.addSeparator()
+
+        self._connect_action = QAction("Connect to Server...", menu)
+        self._connect_action.triggered.connect(self.drive_app.show_login)
+        menu.addAction(self._connect_action)
 
         self._sync_now_action = QAction("Sync Now", menu)
         self._sync_now_action.triggered.connect(self.drive_app.sync_all)
@@ -108,6 +121,10 @@ class SystemTray(QSystemTrayIcon):
         label = STATUS_LABELS.get(status, status)
         self.setToolTip(f"EthOS Drive — {label}")
         self._status_label.setText(f"EthOS Drive — {label}")
+
+        # Show connect when offline, hide when connected
+        self._connect_action.setVisible(status in ("offline", "error"))
+        self._sync_now_action.setEnabled(status not in ("offline",))
 
         # Update pause button text
         if status == "paused":
