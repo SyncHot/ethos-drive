@@ -97,6 +97,8 @@ class SyncEngine(QObject):
 
         try:
             # Step 1: Scan local
+            self.progress.emit({"phase": "scanning", "file": "Scanning local files...",
+                                "action": "scan", "percent": 0, "speed": 0})
             scanner = DirectoryScanner(
                 root=self.task.local_path,
                 filters=self.task.filters,
@@ -106,6 +108,8 @@ class SyncEngine(QObject):
             local_files = scanner.scan(compute_hashes=True)
 
             # Step 2: Fetch remote state
+            self.progress.emit({"phase": "scanning", "file": "Fetching remote state...",
+                                "action": "scan", "percent": 25, "speed": 0})
             try:
                 remote_data = self.api.get_remote_state(self.task.remote_path)
                 remote_files = {f["path"]: f for f in remote_data.get("files", [])}
@@ -118,10 +122,17 @@ class SyncEngine(QObject):
             synced_state = {f["path"]: f for f in self.db.get_all_files(self.task.id)}
 
             # Step 4: Plan actions
+            self.progress.emit({"phase": "planning", "file": "Comparing files...",
+                                "action": "plan", "percent": 50, "speed": 0})
             actions = self._plan_sync(local_files, remote_files, synced_state)
 
             # Step 5: Execute actions
-            for action in actions:
+            total_actions = len(actions)
+            self.progress.emit({"phase": "syncing",
+                                "file": f"Syncing {total_actions} items...",
+                                "action": "sync", "percent": 0, "speed": 0,
+                                "total": total_actions, "done": 0})
+            for i, action in enumerate(actions):
                 if self._cancelled:
                     break
                 try:
@@ -131,6 +142,14 @@ class SyncEngine(QObject):
                     stats["errors"] += 1
                     self.db.log_action(self.task.id, action.action, action.path,
                                        detail=str(e), success=False)
+                # Emit progress every file (debounced by UI)
+                done = i + 1
+                pct = (done / total_actions * 100) if total_actions else 100
+                self.progress.emit({
+                    "phase": "syncing", "file": action.path,
+                    "action": action.action, "percent": round(pct, 1),
+                    "speed": 0, "total": total_actions, "done": done,
+                })
 
             # Update task state
             elapsed = time.time() - start

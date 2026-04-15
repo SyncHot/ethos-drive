@@ -2,6 +2,7 @@
 
 import logging
 import os
+import threading
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal, QTimer
@@ -40,6 +41,7 @@ class EthosDriveApp(QObject):
         self._status = "offline"
         self._paused = False
         self._mounted_drive = ""
+        self._sync_lock = threading.Lock()
 
         self.updater = AutoUpdater(__version__)
         self.updater.update_available.connect(self._on_update_available)
@@ -269,27 +271,45 @@ class EthosDriveApp(QObject):
             del self.engines[task_id]
 
     def sync_all(self):
-        """Trigger full sync for all tasks."""
+        """Trigger full sync for all tasks (runs in background thread)."""
         if self._paused or not self.api_client:
             return
-        self.status = "syncing"
-        for task_id, engine in self.engines.items():
-            try:
-                engine.full_sync()
-            except Exception as e:
-                log.error("Sync failed for task %s: %s", task_id, e)
-        self.status = "idle"
+        if self._sync_lock.locked():
+            log.debug("Sync already in progress, skipping")
+            return
+
+        def _worker():
+            with self._sync_lock:
+                self.status = "syncing"
+                for task_id, engine in list(self.engines.items()):
+                    try:
+                        engine.full_sync()
+                    except Exception as e:
+                        log.error("Sync failed for task %s: %s", task_id, e)
+                self.status = "idle"
+
+        t = threading.Thread(target=_worker, daemon=True, name="sync-all")
+        t.start()
 
     def sync_task(self, task_id: str):
-        """Trigger sync for a specific task."""
+        """Trigger sync for a specific task (runs in background thread)."""
         if self._paused or task_id not in self.engines:
             return
-        self.status = "syncing"
-        try:
-            self.engines[task_id].full_sync()
-        except Exception as e:
-            log.error("Sync failed for task %s: %s", task_id, e)
-        self.status = "idle"
+        if self._sync_lock.locked():
+            log.debug("Sync already in progress, skipping task %s", task_id)
+            return
+
+        def _worker():
+            with self._sync_lock:
+                self.status = "syncing"
+                try:
+                    self.engines[task_id].full_sync()
+                except Exception as e:
+                    log.error("Sync failed for task %s: %s", task_id, e)
+                self.status = "idle"
+
+        t = threading.Thread(target=_worker, daemon=True, name=f"sync-{task_id}")
+        t.start()
 
     def pause(self):
         """Pause all sync operations."""
@@ -307,30 +327,48 @@ class EthosDriveApp(QObject):
         self.sync_all()
 
     def _on_local_changes(self, task_id: str, changes: list[dict]):
-        """Handle detected local file changes."""
+        """Handle detected local file changes (runs in background thread)."""
         if self._paused or task_id not in self.engines:
             return
-        self.status = "syncing"
-        try:
-            self.engines[task_id].process_local_changes(changes)
-        except Exception as e:
-            log.error("Error processing local changes for %s: %s", task_id, e)
-        self.status = "idle"
+        if self._sync_lock.locked():
+            log.debug("Sync in progress, queuing local changes for %s", task_id)
+            return
+
+        def _worker():
+            with self._sync_lock:
+                self.status = "syncing"
+                try:
+                    self.engines[task_id].process_local_changes(changes)
+                except Exception as e:
+                    log.error("Error processing local changes for %s: %s", task_id, e)
+                self.status = "idle"
+
+        t = threading.Thread(target=_worker, daemon=True, name=f"local-{task_id}")
+        t.start()
 
     def _on_remote_change(self, data: dict):
         """Handle real-time remote change notification from server."""
         if self._paused:
             return
         remote_path = data.get("path", "")
-        for task_id, engine in self.engines.items():
+        for task_id, engine in list(self.engines.items()):
             task = engine.task
             if remote_path.startswith(task.remote_path):
-                self.status = "syncing"
-                try:
-                    engine.process_remote_changes([data])
-                except Exception as e:
-                    log.error("Error processing remote change for %s: %s", task_id, e)
-                self.status = "idle"
+                if self._sync_lock.locked():
+                    log.debug("Sync in progress, skipping remote change for %s", task_id)
+                    return
+
+                def _worker(tid=task_id, eng=engine):
+                    with self._sync_lock:
+                        self.status = "syncing"
+                        try:
+                            eng.process_remote_changes([data])
+                        except Exception as e:
+                            log.error("Error processing remote change for %s: %s", tid, e)
+                        self.status = "idle"
+
+                t = threading.Thread(target=_worker, daemon=True, name=f"remote-{task_id}")
+                t.start()
 
     def _periodic_sync(self):
         """Periodic full sync as reliability safety net."""

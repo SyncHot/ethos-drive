@@ -182,6 +182,7 @@ class ActivityWidget(QWidget):
         self._total_bytes_transferred = 0
         self._total_bytes_all = 0
         self._session_start = 0.0
+        self._last_phase_update = 0.0
         self._setup_ui()
 
         app.sync_progress.connect(self._on_progress)
@@ -356,7 +357,42 @@ class ActivityWidget(QWidget):
         layout.addWidget(splitter)
 
     def _on_progress(self, data: dict):
-        """Update per-file transfer widget and overall stats."""
+        """Update per-file transfer widget and overall stats.
+
+        Handles two kinds of progress:
+          1. Phase progress from SyncEngine (phase, file, action, percent)
+          2. Per-file transfer progress from TransferManager (path, direction, ...)
+        """
+        phase = data.get("phase", "")
+        if phase:
+            # Phase-level progress (scanning / planning / syncing)
+            now = time.monotonic()
+            if now - self._last_phase_update < 0.25:
+                return  # Debounce: max 4 updates/sec for phase progress
+            self._last_phase_update = now
+
+            total_actions = data.get("total", 0)
+            done_actions = data.get("done", 0)
+            pct = data.get("percent", 0)
+            label = data.get("file", "")
+
+            if phase in ("scanning", "planning"):
+                self._overall_status.setText(label)
+                self._overall_status.setStyleSheet(
+                    "color: #FFB74D; font-size: 13px; font-weight: bold;")
+                self._overall_progress.setValue(int(pct * 10))
+                self._overall_progress.setFormat(label)
+            elif phase == "syncing":
+                self._overall_status.setText(f"Syncing ({done_actions}/{total_actions})")
+                self._overall_status.setStyleSheet(
+                    "color: #42A5F5; font-size: 13px; font-weight: bold;")
+                self._overall_progress.setValue(int(pct * 10))
+                self._overall_progress.setFormat(
+                    f"{done_actions}/{total_actions} — {pct:.0f}%")
+                self._files_label.setText(f"Files: {done_actions} / {total_actions}")
+            return
+
+        # Per-file transfer progress
         path = data.get("path", "")
         direction = data.get("direction", "")
         percent = data.get("percent", 0)
