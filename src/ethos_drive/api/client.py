@@ -81,16 +81,21 @@ class EthosAPIClient:
 
     # --- Authentication ---
 
-    def login(self, username: str, password: str) -> Optional[str]:
-        """Authenticate and get token."""
-        data = self._request("POST", "/api/auth/login", json={
-            "username": username,
-            "password": password,
-        })
+    def login(self, username: str, password: str, totp_code: str = "") -> dict:
+        """Authenticate and get token.
+
+        Returns dict with either:
+          {"token": "..."} on success
+          {"totp_required": True} if 2FA code needed
+        """
+        payload = {"username": username, "password": password}
+        if totp_code:
+            payload["totp_code"] = totp_code
+        data = self._request("POST", "/api/auth/login", json=payload)
         token = data.get("token")
         if token:
             self.set_token(token)
-        return token
+        return data
 
     def check_connection(self) -> bool:
         """Test if we can reach the server and our token is valid."""

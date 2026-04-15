@@ -174,7 +174,8 @@ class EthosDriveApp(QObject):
             else:
                 creds = self.config.get_credentials()
                 if creds:
-                    token = self.api_client.login(creds["username"], creds["password"])
+                    data = self.api_client.login(creds["username"], creds["password"])
+                    token = data.get("token") if isinstance(data, dict) else data
                     if token:
                         self.config.save_token(token)
 
