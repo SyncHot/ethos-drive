@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 GITHUB_REPO = "SyncHot/ethos-drive"
 RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-ASSET_NAME = "EthOSDriveSetup.exe"
+ASSET_NAME = "EthOS.Drive.exe"
 
 
 class _UpdateCheckWorker(QThread):
