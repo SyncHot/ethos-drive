@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QWidget, QListWidget, QListWidgetItem, QMessageBox,
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 
 from ethos_drive.config import SyncTask, FilterRule
 from ethos_drive.api.client import EthosAPIClient
@@ -80,7 +81,12 @@ class TaskEditorDialog(QDialog):
         # Remote folder
         remote_row = QHBoxLayout()
         self._remote_input = QLineEdit(self.task.remote_path)
-        self._remote_input.setPlaceholderText("/home/admin/Documents")
+        self._remote_input.setPlaceholderText("/  (your home folder root)")
+        self._remote_input.setToolTip(
+            "Path relative to your home folder on EthOS.\n"
+            "'/' = entire home folder\n"
+            "'/Documents' = only Documents subfolder"
+        )
         remote_row.addWidget(self._remote_input)
         if self.api:
             browse_remote_btn = QPushButton("Browse...")
@@ -203,12 +209,14 @@ class TaskEditorDialog(QDialog):
             self._local_input.setText(folder)
 
     def _browse_remote(self):
-        """Simple remote folder browser using the API."""
+        """Open a tree browser dialog for selecting a remote folder."""
         if not self.api:
             return
-        # For now, just let user type the path
-        # TODO: implement tree browser dialog
-        pass
+        dlg = _RemoteBrowserDialog(self.api, self._remote_input.text(), parent=self)
+        if dlg.exec():
+            selected = dlg.selected_path
+            if selected:
+                self._remote_input.setText(selected)
 
     def _add_filter(self):
         pattern = self._filter_pattern.text().strip()
@@ -263,3 +271,185 @@ class TaskEditorDialog(QDialog):
         self.task.sync_interval_seconds = self._sync_interval.value()
 
         self.accept()
+
+
+class _RemoteBrowserDialog(QDialog):
+    """Tree browser dialog for selecting a remote folder from EthOS server."""
+
+    def __init__(self, api: EthosAPIClient, initial_path: str = "/", parent=None):
+        super().__init__(parent)
+        self.api = api
+        self.selected_path = initial_path or "/"
+        self._setup_ui()
+        self._load_path("/")
+
+    def _setup_ui(self):
+        self.setWindowTitle("Select Remote Folder")
+        self.setMinimumSize(450, 400)
+        self.resize(500, 500)
+
+        layout = QVBoxLayout(self)
+
+        # Header
+        header = QLabel("Select a folder from your EthOS home directory:")
+        header.setStyleSheet("font-size: 13px; margin-bottom: 4px;")
+        layout.addWidget(header)
+
+        # Current path display
+        path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("Path:"))
+        self._path_label = QLineEdit("/")
+        self._path_label.setReadOnly(True)
+        self._path_label.setStyleSheet(
+            "QLineEdit { background: #1a1a2e; color: #90CAF9; border: 1px solid #333; "
+            "padding: 4px 8px; border-radius: 3px; font-family: monospace; }")
+        path_row.addWidget(self._path_label)
+        layout.addLayout(path_row)
+
+        # Navigation buttons
+        nav_row = QHBoxLayout()
+        self._up_btn = QPushButton("⬆ Parent Folder")
+        self._up_btn.clicked.connect(self._go_up)
+        self._up_btn.setEnabled(False)
+        nav_row.addWidget(self._up_btn)
+
+        self._home_btn = QPushButton("🏠 Home (/)")
+        self._home_btn.clicked.connect(lambda: self._load_path("/"))
+        nav_row.addWidget(self._home_btn)
+
+        self._refresh_btn = QPushButton("🔄 Refresh")
+        self._refresh_btn.clicked.connect(lambda: self._load_path(self.selected_path))
+        nav_row.addWidget(self._refresh_btn)
+
+        nav_row.addStretch()
+        layout.addLayout(nav_row)
+
+        # Folder tree
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["Name", "Type", "Size"])
+        self._tree.setColumnWidth(0, 280)
+        self._tree.setColumnWidth(1, 60)
+        self._tree.setColumnWidth(2, 80)
+        self._tree.setRootIsDecorated(False)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setStyleSheet(
+            "QTreeWidget { background: #1e1e30; alternate-background-color: #24243a; "
+            "border: 1px solid #333; } "
+            "QTreeWidget::item { padding: 4px; } "
+            "QTreeWidget::item:selected { background: #2196F3; }")
+        self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self._tree.itemClicked.connect(self._on_item_clicked)
+        layout.addWidget(self._tree)
+
+        # Status
+        self._status = QLabel("")
+        self._status.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(self._status)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        self._select_current_btn = QPushButton("Select This Folder")
+        self._select_current_btn.setStyleSheet(
+            "QPushButton { background: #4CAF50; color: white; border: none; padding: 8px 20px; "
+            "border-radius: 4px; font-weight: bold; } QPushButton:hover { background: #388E3C; }")
+        self._select_current_btn.clicked.connect(self._select_current)
+        btn_row.addWidget(self._select_current_btn)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _load_path(self, path: str):
+        """Load directory contents from the server."""
+        self._tree.clear()
+        self.selected_path = path
+        self._path_label.setText(path)
+        self._up_btn.setEnabled(path != "/")
+        self._status.setText("Loading...")
+
+        try:
+            data = self.api.browse(path)
+            if data.get("error"):
+                self._status.setText(f"Error: {data['error']}")
+                return
+
+            entries = data.get("entries", [])
+            dirs = [e for e in entries if e.get("is_dir")]
+            files = [e for e in entries if not e.get("is_dir")]
+
+            # Show directories first
+            for entry in dirs:
+                item = QTreeWidgetItem()
+                item.setText(0, f"📁  {entry['name']}")
+                item.setText(1, "Folder")
+                item.setText(2, "")
+                item.setData(0, Qt.UserRole, entry["path"])
+                item.setData(0, Qt.UserRole + 1, True)  # is_dir flag
+                self._tree.addTopLevelItem(item)
+
+            # Then files (for reference — user sees what's in the folder)
+            for entry in files:
+                item = QTreeWidgetItem()
+                item.setText(0, f"📄  {entry['name']}")
+                item.setText(1, "File")
+                item.setText(2, self._format_size(entry.get("size", 0)))
+                item.setData(0, Qt.UserRole, entry["path"])
+                item.setData(0, Qt.UserRole + 1, False)
+                item.setForeground(0, QColor("#888"))
+                item.setForeground(1, QColor("#888"))
+                item.setForeground(2, QColor("#888"))
+                self._tree.addTopLevelItem(item)
+
+            count = len(dirs)
+            file_count = len(files)
+            self._status.setText(
+                f"{count} folder{'s' if count != 1 else ''}, "
+                f"{file_count} file{'s' if file_count != 1 else ''}")
+
+            if not entries:
+                self._status.setText("Empty folder")
+
+        except Exception as e:
+            log.error("Browse error: %s", e)
+            self._status.setText(f"Error: {e}")
+
+    def _on_item_double_clicked(self, item, column):
+        """Double-click on folder = navigate into it."""
+        is_dir = item.data(0, Qt.UserRole + 1)
+        if is_dir:
+            path = item.data(0, Qt.UserRole)
+            self._load_path(path)
+
+    def _on_item_clicked(self, item, column):
+        """Single click on folder = select it as target."""
+        is_dir = item.data(0, Qt.UserRole + 1)
+        if is_dir:
+            path = item.data(0, Qt.UserRole)
+            self.selected_path = path
+            self._path_label.setText(path)
+
+    def _go_up(self):
+        """Navigate to parent directory."""
+        path = self.selected_path.rstrip("/")
+        if "/" in path:
+            parent = path.rsplit("/", 1)[0]
+            if not parent:
+                parent = "/"
+            self._load_path(parent)
+
+    def _select_current(self):
+        """Select the currently displayed folder."""
+        self.accept()
+
+    @staticmethod
+    def _format_size(b: int) -> str:
+        if b < 1024:
+            return f"{b} B"
+        if b < 1024 * 1024:
+            return f"{b / 1024:.1f} KB"
+        if b < 1024 * 1024 * 1024:
+            return f"{b / (1024 * 1024):.1f} MB"
+        return f"{b / (1024 * 1024 * 1024):.2f} GB"
