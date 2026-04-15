@@ -58,9 +58,9 @@ class MainWindow(QMainWindow):
         self._tasks_tab = self._create_tasks_tab()
         self._tabs.addTab(self._tasks_tab, "Sync Tasks")
 
-        # Tab 2: Activity
+        # Tab 2: Transfers & Activity
         self._activity_widget = ActivityWidget(self.drive_app)
-        self._tabs.addTab(self._activity_widget, "Activity")
+        self._tabs.addTab(self._activity_widget, "Transfers")
 
         # Tab 3: Conflicts
         self._conflicts_widget = ConflictsWidget(self.drive_app)
@@ -86,6 +86,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._status_text)
 
         layout.addStretch()
+
+        self._pause_btn = QPushButton("⏸ Pause")
+        self._pause_btn.setStyleSheet(
+            "QPushButton { background: #FF9800; color: white; border: none; padding: 6px 16px; "
+            "border-radius: 4px; font-weight: bold; } QPushButton:hover { background: #F57C00; }")
+        self._pause_btn.clicked.connect(self._toggle_pause)
+        self._pause_btn.setVisible(False)
+        layout.addWidget(self._pause_btn)
 
         self._sync_now_btn = QPushButton("Sync Now")
         self._sync_now_btn.setStyleSheet(
@@ -285,6 +293,26 @@ class MainWindow(QMainWindow):
         color = colors.get(status, "#9E9E9E")
         self._status_icon.setStyleSheet(f"color: {color}; font-size: 18px;")
         self._status_text.setText(labels.get(status, status))
+
+        # Show/hide pause button
+        connected = status not in ("offline",)
+        self._pause_btn.setVisible(connected)
+        if status == "paused":
+            self._pause_btn.setText("▶ Resume")
+            self._pause_btn.setStyleSheet(
+                "QPushButton { background: #4CAF50; color: white; border: none; padding: 6px 16px; "
+                "border-radius: 4px; font-weight: bold; } QPushButton:hover { background: #388E3C; }")
+        else:
+            self._pause_btn.setText("⏸ Pause")
+            self._pause_btn.setStyleSheet(
+                "QPushButton { background: #FF9800; color: white; border: none; padding: 6px 16px; "
+                "border-radius: 4px; font-weight: bold; } QPushButton:hover { background: #F57C00; }")
+
+    def _toggle_pause(self):
+        if self.drive_app.status == "paused":
+            self.drive_app.resume()
+        else:
+            self.drive_app.pause()
 
     def _on_sync_progress(self, data: dict):
         pass  # Could update task list items with progress
