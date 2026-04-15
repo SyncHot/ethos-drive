@@ -64,11 +64,12 @@ class SyncEngine(QObject):
     completed = Signal(dict)      # {uploaded, downloaded, deleted, conflicts, errors}
 
     def __init__(self, task: SyncTask, api_client: EthosAPIClient,
-                 state_db: SyncStateDB):
+                 state_db: SyncStateDB, watcher=None):
         super().__init__()
         self.task = task
         self.api = api_client
         self.db = state_db
+        self.watcher = watcher
         self._cancelled = False
 
         self.filter_engine = FilterEngine(
@@ -225,12 +226,10 @@ class SyncEngine(QObject):
             # One side changed — determine which
             if was_synced:
                 local_changed = (
-                    local_fp.get("xxhash") != synced.get("local_xxhash") or
-                    local_fp.get("size") != synced.get("local_size")
+                    local_fp.get("xxhash") != synced.get("local_xxhash")
                 )
                 remote_changed = (
-                    remote_fp.get("xxhash") != synced.get("remote_xxhash") or
-                    remote_fp.get("size") != synced.get("remote_size")
+                    remote_fp.get("xxhash") != synced.get("remote_xxhash")
                 )
 
                 if local_changed and not remote_changed:
@@ -296,23 +295,29 @@ class SyncEngine(QObject):
                     existing["remote_xxhash"], existing["remote_mtime_ns"],
                 )
 
-            self.api.upload_file(local_abs, remote_path)
+            resp = self.api.upload_file(local_abs, remote_path)
 
-            fp = content_fingerprint(local_abs)
-            if fp:
+            local_fp = content_fingerprint(local_abs)
+            if local_fp:
+                # Use server-returned xxhash for remote state (content is same)
+                remote_xxhash = resp.get("xxhash", local_fp["xxhash"]) if isinstance(resp, dict) else local_fp["xxhash"]
                 self.db.mark_synced(self.task.id, path,
-                                    local_size=fp["size"],
-                                    local_mtime_ns=fp["mtime_ns"],
-                                    local_xxhash=fp["xxhash"],
-                                    remote_size=fp["size"],
-                                    remote_mtime_ns=fp["mtime_ns"],
-                                    remote_xxhash=fp["xxhash"])
+                                    local_size=local_fp["size"],
+                                    local_mtime_ns=local_fp["mtime_ns"],
+                                    local_xxhash=local_fp["xxhash"],
+                                    remote_size=local_fp["size"],
+                                    remote_mtime_ns=local_fp["mtime_ns"],
+                                    remote_xxhash=remote_xxhash)
             self.db.log_action(self.task.id, "upload", path)
             stats["uploaded"] += 1
 
         elif action.action == SyncAction.DOWNLOAD:
             log.info("Downloading: %s", path)
             remote_path = os.path.join(self.task.remote_path, path).replace("\\", "/")
+
+            # Suppress file watcher to prevent re-upload loop
+            if self.watcher:
+                self.watcher.suppress(local_abs, duration=10.0)
 
             # Record version of local file before overwriting
             if os.path.exists(local_abs):
@@ -412,16 +417,17 @@ class SyncEngine(QObject):
                     abs_path = change.get("abs_path", remote_to_local(path, self.task.local_path))
                     if os.path.isfile(abs_path):
                         remote_path = os.path.join(self.task.remote_path, path).replace("\\", "/")
-                        self.api.upload_file(abs_path, remote_path)
+                        resp = self.api.upload_file(abs_path, remote_path)
                         fp = content_fingerprint(abs_path)
                         if fp:
+                            remote_xxhash = resp.get("xxhash", fp["xxhash"]) if isinstance(resp, dict) else fp["xxhash"]
                             self.db.mark_synced(self.task.id, path,
                                                 local_size=fp["size"],
                                                 local_mtime_ns=fp["mtime_ns"],
                                                 local_xxhash=fp["xxhash"],
                                                 remote_size=fp["size"],
                                                 remote_mtime_ns=fp["mtime_ns"],
-                                                remote_xxhash=fp["xxhash"])
+                                                remote_xxhash=remote_xxhash)
                         self.db.log_action(self.task.id, "upload", path)
 
                 elif action == "deleted":
@@ -457,6 +463,9 @@ class SyncEngine(QObject):
             try:
                 if action in ("created", "modified"):
                     remote_full = os.path.join(self.task.remote_path, path).replace("\\", "/")
+                    # Suppress watcher to prevent re-upload loop
+                    if self.watcher:
+                        self.watcher.suppress(local_abs, duration=10.0)
                     self.api.download_file(remote_full, local_abs)
                     fp = content_fingerprint(local_abs)
                     if fp:

@@ -29,11 +29,16 @@ class EthosAPIClient:
     """HTTP client for the EthOS sync-drive API.
 
     Handles authentication, request retries, and chunked transfers.
+    On 401 (token expired), automatically re-authenticates using stored
+    credentials and retries the request once.
     """
 
     def __init__(self, server_url: str, verify_ssl: bool = True):
         self.server_url = server_url.rstrip("/")
         self.token: Optional[str] = None
+        self._credentials: Optional[dict] = None  # {username, password}
+        self._on_token_refreshed = None  # callback(new_token) to persist
+        self._reauth_in_progress = False
         self._client = httpx.Client(
             base_url=self.server_url,
             verify=verify_ssl,
@@ -46,38 +51,92 @@ class EthosAPIClient:
         self.token = token
         self._client.headers["Authorization"] = f"Bearer {token}"
 
+    def set_credentials(self, username: str, password: str):
+        """Store credentials for automatic re-authentication on token expiry."""
+        self._credentials = {"username": username, "password": password}
+
+    def set_token_refresh_callback(self, callback):
+        """Set callback invoked with new token after successful re-auth."""
+        self._on_token_refreshed = callback
+
     def _headers(self) -> dict:
         h = {}
         if self.token:
             h["Authorization"] = f"Bearer {self.token}"
         return h
 
-    def _request(self, method: str, path: str, **kwargs) -> dict:
-        """Make an authenticated API request. Returns parsed JSON."""
+    def _raw_request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        """Execute HTTP request and return raw response."""
         kwargs.setdefault("headers", {}).update(self._headers())
         try:
-            resp = self._client.request(method, path, **kwargs)
+            return self._client.request(method, path, **kwargs)
         except httpx.ConnectError as e:
             raise APIError(f"Cannot connect to server: {e}") from e
         except httpx.TimeoutException as e:
             raise APIError(f"Request timed out: {e}") from e
 
+    def _parse_response(self, resp: httpx.Response) -> dict:
+        """Parse response, raise APIError on failure."""
         if resp.status_code == 401:
             raise APIError("Authentication failed", status_code=401)
         if resp.status_code == 403:
             raise APIError("Forbidden", status_code=403)
-
         try:
             data = resp.json()
         except Exception:
             if resp.status_code >= 400:
                 raise APIError(f"HTTP {resp.status_code}: {resp.text}", status_code=resp.status_code)
             return {"ok": True}
-
         if resp.status_code >= 400:
             raise APIError(data.get("error", f"HTTP {resp.status_code}"), status_code=resp.status_code, response=data)
-
         return data
+
+    def _try_reauth(self) -> bool:
+        """Re-authenticate using stored credentials. Returns True on success."""
+        if self._reauth_in_progress or not self._credentials:
+            return False
+        self._reauth_in_progress = True
+        try:
+            log.info("Token expired, re-authenticating...")
+            payload = {
+                "username": self._credentials["username"],
+                "password": self._credentials["password"],
+            }
+            resp = self._raw_request("POST", "/api/auth/login", json=payload)
+            data = resp.json()
+            token = data.get("token")
+            if data.get("totp_required"):
+                log.warning("Re-auth requires TOTP — cannot auto-refresh")
+                return False
+            if token:
+                self.set_token(token)
+                if self._on_token_refreshed:
+                    self._on_token_refreshed(token)
+                log.info("Re-authentication successful")
+                return True
+            return False
+        except Exception as e:
+            log.warning("Re-authentication failed: %s", e)
+            return False
+        finally:
+            self._reauth_in_progress = False
+
+    def _request(self, method: str, path: str, **kwargs) -> dict:
+        """Make an authenticated API request. Returns parsed JSON.
+
+        On 401, attempts to re-authenticate with stored credentials
+        and retries the request once.
+        """
+        resp = self._raw_request(method, path, **kwargs)
+
+        if resp.status_code == 401 and path != "/api/auth/login":
+            if self._try_reauth():
+                # Update auth header and retry
+                if "headers" in kwargs:
+                    kwargs["headers"].update(self._headers())
+                resp = self._raw_request(method, path, **kwargs)
+
+        return self._parse_response(resp)
 
     # --- Authentication ---
 

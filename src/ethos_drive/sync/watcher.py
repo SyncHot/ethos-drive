@@ -34,6 +34,7 @@ class _EventCollector(FileSystemEventHandler):
         self.filters = filters
         self._pending: dict[str, dict] = {}  # rel_path -> {action, time, ...}
         self._lock = threading.Lock()
+        self._suppressed: dict[str, float] = {}  # abs_path -> suppress_until
 
     def on_created(self, event):
         self._record(event.src_path, "created", event.is_directory)
@@ -61,6 +62,13 @@ class _EventCollector(FileSystemEventHandler):
         if name.endswith((".ethos-tmp", ".ethos-conflict", ".partial")):
             return
 
+        # Skip suppressed paths (files we just wrote via sync)
+        norm = os.path.normpath(abs_path)
+        with self._lock:
+            until = self._suppressed.get(norm)
+            if until and time.time() < until:
+                return
+
         rel = local_to_remote(abs_path, self.root)
 
         with self._lock:
@@ -71,6 +79,18 @@ class _EventCollector(FileSystemEventHandler):
                 "is_dir": is_dir,
                 "time": time.time(),
             }
+
+    def suppress(self, abs_path: str, duration: float = 5.0):
+        """Suppress events for a path for the given duration (seconds)."""
+        norm = os.path.normpath(abs_path)
+        with self._lock:
+            self._suppressed[norm] = time.time() + duration
+
+    def unsuppress(self, abs_path: str):
+        """Remove suppression for a path."""
+        norm = os.path.normpath(abs_path)
+        with self._lock:
+            self._suppressed.pop(norm, None)
 
     def flush(self) -> list[dict]:
         """Return all changes that have been stable for DEBOUNCE_SECONDS."""
@@ -155,3 +175,8 @@ class FileWatcher(QObject):
 
     def resume(self):
         self._paused = False
+
+    def suppress(self, abs_path: str, duration: float = 5.0):
+        """Suppress events for a path (e.g. during download)."""
+        if self._collector:
+            self._collector.suppress(abs_path, duration)

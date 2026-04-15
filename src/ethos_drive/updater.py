@@ -111,6 +111,7 @@ class AutoUpdater(QObject):
     update_available = Signal(str, str, str)  # version, download_url, notes
     update_downloaded = Signal(str)           # installer_path
     download_progress = Signal(int)           # 0-100
+    download_failed = Signal(str)             # error message
     no_update = Signal()
 
     def __init__(self, current_version: str):
@@ -149,6 +150,7 @@ class AutoUpdater(QObject):
             self.update_downloaded.emit(result)
         else:
             log.error("Download failed: %s", result)
+            self.download_failed.emit(result)
 
     def install_update(self, installer_path: str = ""):
         """Launch the installer and quit the app."""

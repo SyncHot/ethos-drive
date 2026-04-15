@@ -154,11 +154,26 @@ class EthosDriveApp(QObject):
             )
 
     def download_and_install_update(self, url: str):
-        """Download an update and install it."""
+        """Download an update with progress dialog and install it."""
+        from ethos_drive.ui.update_progress import UpdateProgressDialog
+        self._update_dialog = UpdateProgressDialog()
+        self._update_dialog.show()
+
+        self.updater.download_progress.connect(self._update_dialog.set_progress)
+        self.updater.update_downloaded.connect(self._on_update_ready)
+        self.updater.download_failed.connect(self._on_update_failed)
         self.updater.download_update(url)
-        self.updater.update_downloaded.connect(
-            lambda path: self.updater.install_update(path)
-        )
+
+    def _on_update_ready(self, path: str):
+        """Update downloaded — show installing state and launch installer."""
+        if hasattr(self, '_update_dialog') and self._update_dialog:
+            self._update_dialog.set_installing()
+        self.updater.install_update(path)
+
+    def _on_update_failed(self, error: str):
+        """Update download failed — show error in dialog."""
+        if hasattr(self, '_update_dialog') and self._update_dialog:
+            self._update_dialog.set_error(error)
 
     def _connect(self):
         """Connect to EthOS server."""
@@ -168,16 +183,20 @@ class EthosDriveApp(QObject):
                 verify_ssl=self.config.verify_ssl,
             )
 
+            # Enable auto-re-auth on token expiry
+            creds = self.config.get_credentials()
+            if creds:
+                self.api_client.set_credentials(creds["username"], creds["password"])
+            self.api_client.set_token_refresh_callback(self._on_token_refreshed)
+
             token = self.config.get_token()
             if token:
                 self.api_client.set_token(token)
-            else:
-                creds = self.config.get_credentials()
-                if creds:
-                    data = self.api_client.login(creds["username"], creds["password"])
-                    token = data.get("token") if isinstance(data, dict) else data
-                    if token:
-                        self.config.save_token(token)
+            elif creds:
+                data = self.api_client.login(creds["username"], creds["password"])
+                token = data.get("token") if isinstance(data, dict) else data
+                if token:
+                    self.config.save_token(token)
 
             if not self.api_client.token:
                 self.status = "error"
@@ -210,6 +229,11 @@ class EthosDriveApp(QObject):
             log.error("Connection failed: %s", e)
             self.status = "error"
 
+    def _on_token_refreshed(self, new_token: str):
+        """Called by API client after successful automatic re-authentication."""
+        self.config.save_token(new_token)
+        log.info("Token refreshed and saved")
+
     def _init_sync_tasks(self):
         """Create sync engines and watchers for all configured tasks."""
         for task in self.config.sync_tasks:
@@ -219,15 +243,6 @@ class EthosDriveApp(QObject):
 
     def _start_task(self, task: SyncTask):
         """Start syncing a single task."""
-        engine = SyncEngine(
-            task=task,
-            api_client=self.api_client,
-            state_db=self.state_db,
-        )
-        engine.progress.connect(lambda p, tid=task.id: self.sync_progress.emit({**p, "task_id": tid}))
-        engine.conflict.connect(lambda c, tid=task.id: self.conflict_detected.emit({**c, "task_id": tid}))
-        self.engines[task.id] = engine
-
         watcher = FileWatcher(
             local_path=task.local_path,
             filters=task.filters,
@@ -235,6 +250,16 @@ class EthosDriveApp(QObject):
         watcher.changes_detected.connect(lambda changes, tid=task.id: self._on_local_changes(tid, changes))
         watcher.start()
         self.watchers[task.id] = watcher
+
+        engine = SyncEngine(
+            task=task,
+            api_client=self.api_client,
+            state_db=self.state_db,
+            watcher=watcher,
+        )
+        engine.progress.connect(lambda p, tid=task.id: self.sync_progress.emit({**p, "task_id": tid}))
+        engine.conflict.connect(lambda c, tid=task.id: self.conflict_detected.emit({**c, "task_id": tid}))
+        self.engines[task.id] = engine
 
         log.info("Started sync task: %s (%s <-> %s)", task.name, task.local_path, task.remote_path)
 
