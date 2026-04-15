@@ -110,7 +110,7 @@ class SystemTray(QSystemTrayIcon):
         menu.addAction(self._update_action)
 
         # Listen for update availability
-        app.update_available.connect(self._on_update_available)
+        self.drive_app.update_available.connect(self._on_update_available)
 
         menu.addSeparator()
 
