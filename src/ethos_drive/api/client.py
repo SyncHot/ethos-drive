@@ -12,6 +12,7 @@ log = logging.getLogger(__name__)
 
 # API timeout defaults
 TIMEOUT_DEFAULT = 30
+TIMEOUT_STATE = 120
 TIMEOUT_UPLOAD = 300
 TIMEOUT_DOWNLOAD = 600
 
@@ -181,15 +182,17 @@ class EthosAPIClient:
 
     # --- Sync State ---
 
-    def get_remote_state(self, remote_path: str, recursive: bool = True) -> dict:
+    def get_remote_state(self, remote_path: str, recursive: bool = True,
+                         include_hash: bool = False) -> dict:
         """Get file listing with metadata for a remote directory.
 
-        Returns: {files: [{path, size, mtime_ns, xxhash, is_dir}, ...]}
+        Returns: {files: [{path, size, mtime_ns, is_dir}, ...]}
         """
         return self._request("POST", "/api/sync-drive/state", json={
             "path": remote_path,
             "recursive": recursive,
-        })
+            "include_hash": include_hash,
+        }, timeout=TIMEOUT_STATE)
 
     def get_changes_since(self, remote_path: str, since_version: int) -> dict:
         """Get changes since a specific sync version.

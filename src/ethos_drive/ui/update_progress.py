@@ -6,6 +6,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
+from ethos_drive.ui.icons import get_app_icon
+
 
 class UpdateProgressDialog(QDialog):
     """Shows download and install progress for app updates."""
@@ -13,6 +15,7 @@ class UpdateProgressDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Updating EthOS Drive")
+        self.setWindowIcon(get_app_icon())
         self.setFixedSize(400, 180)
         self.setWindowFlags(
             Qt.WindowType.Dialog

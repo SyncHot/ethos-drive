@@ -19,6 +19,7 @@ from ethos_drive.config import SyncTask
 from ethos_drive.ui.task_editor import TaskEditorDialog
 from ethos_drive.ui.activity import ActivityWidget
 from ethos_drive.ui.conflicts import ConflictsWidget
+from ethos_drive.ui.icons import get_app_icon
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self):
         self.setWindowTitle("EthOS Drive")
+        self.setWindowIcon(get_app_icon())
         self.setMinimumSize(700, 500)
         self.resize(850, 600)
 

@@ -55,6 +55,16 @@ def main():
     # Single instance check — must be first
     _lock = _acquire_single_instance_lock()
 
+    # On Windows, set AppUserModelID BEFORE QApplication so the taskbar
+    # and window title bars use our custom icon instead of the Python default.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "EthOS.Drive.Client.1")
+        except Exception:
+            pass
+
     # Allow clean Ctrl+C shutdown
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
@@ -64,6 +74,7 @@ def main():
 
     from ethos_drive.app import EthosDriveApp
     from ethos_drive.utils.logging import setup_logging
+    from ethos_drive.ui.icons import get_app_icon
 
     setup_logging()
 
@@ -75,13 +86,8 @@ def main():
     # Keep lock handle alive
     app._instance_lock = _lock
 
-    # Set application icon — try .ico first (Windows), then .png
-    icon_dir = os.path.join(os.path.dirname(__file__), "..", "resources", "icons")
-    for icon_name in ("ethos-drive.ico", "ethos-drive.png"):
-        icon_path = os.path.join(icon_dir, icon_name)
-        if os.path.exists(icon_path):
-            app.setWindowIcon(QIcon(icon_path))
-            break
+    # Set application icon (propagates to all windows on most platforms)
+    app.setWindowIcon(get_app_icon())
 
     start_minimized = "--minimized" in sys.argv
 

@@ -12,6 +12,7 @@ from PySide6.QtGui import QFont
 
 from ethos_drive.config import Config
 from ethos_drive.api.client import EthosAPIClient, APIError
+from ethos_drive.ui.icons import get_app_icon
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class LoginDialog(QDialog):
 
     def _setup_ui(self):
         self.setWindowTitle("Connect to EthOS Server")
+        self.setWindowIcon(get_app_icon())
         self.setFixedSize(420, 400)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 

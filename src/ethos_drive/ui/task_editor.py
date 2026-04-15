@@ -15,6 +15,7 @@ from PySide6.QtGui import QColor
 
 from ethos_drive.config import SyncTask, FilterRule
 from ethos_drive.api.client import EthosAPIClient
+from ethos_drive.ui.icons import get_app_icon
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class TaskEditorDialog(QDialog):
 
     def _setup_ui(self):
         self.setWindowTitle("Sync Task" if self.task.name == "My Sync" else f"Edit: {self.task.name}")
+        self.setWindowIcon(get_app_icon())
         self.setMinimumSize(550, 480)
 
         layout = QVBoxLayout(self)
@@ -292,6 +294,7 @@ class _RemoteBrowserDialog(QDialog):
 
     def _setup_ui(self):
         self.setWindowTitle("Select Remote Folder")
+        self.setWindowIcon(get_app_icon())
         self.setMinimumSize(480, 420)
         self.resize(520, 520)
         self.setModal(True)

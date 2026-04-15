@@ -111,10 +111,20 @@ class SyncEngine(QObject):
             self.progress.emit({"phase": "scanning", "file": "Fetching remote state...",
                                 "action": "scan", "percent": 25, "speed": 0})
             try:
+                log.info("Requesting remote state for: %s", self.task.remote_path)
                 remote_data = self.api.get_remote_state(self.task.remote_path)
                 remote_files = {f["path"]: f for f in remote_data.get("files", [])}
+                log.info("Remote state: %d files", len(remote_files))
             except APIError as e:
                 log.error("Cannot fetch remote state: %s", e)
+                self.progress.emit({"phase": "error", "file": f"Error: {e}",
+                                    "action": "error", "percent": 0, "speed": 0})
+                stats["errors"] += 1
+                return stats
+            except Exception as e:
+                log.error("Unexpected error fetching remote state: %s", e, exc_info=True)
+                self.progress.emit({"phase": "error", "file": f"Connection error: {e}",
+                                    "action": "error", "percent": 0, "speed": 0})
                 stats["errors"] += 1
                 return stats
 

@@ -11,6 +11,8 @@ from PySide6.QtCore import Qt
 if TYPE_CHECKING:
     from ethos_drive.app import EthosDriveApp
 
+from ethos_drive.ui.icons import get_app_icon, _find_ico_path
+
 log = logging.getLogger(__name__)
 
 # Status colors
@@ -31,36 +33,10 @@ STATUS_LABELS = {
 }
 
 
-def _find_ico_path() -> str:
-    """Find the ethos-drive.ico file (works both frozen and dev)."""
-    import sys as _sys
-    if getattr(_sys, "frozen", False):
-        # PyInstaller --onefile extracts to _MEIPASS temp dir
-        meipass = getattr(_sys, "_MEIPASS", "")
-        exe_dir = os.path.dirname(_sys.executable)
-        candidates = [
-            os.path.join(meipass, "resources", "icons", "ethos-drive.ico") if meipass else "",
-            os.path.join(exe_dir, "resources", "icons", "ethos-drive.ico"),
-            os.path.join(exe_dir, "_internal", "resources", "icons", "ethos-drive.ico"),
-        ]
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-        candidates = [
-            os.path.join(base, "..", "resources", "icons", "ethos-drive.ico"),
-            os.path.join(base, "..", "..", "resources", "icons", "ethos-drive.ico"),
-        ]
-    for c in candidates:
-        if c:
-            p = os.path.normpath(c)
-            if os.path.isfile(p):
-                return p
-    return ""
-
-
-def _create_fallback_icon(color_hex: str, size: int = 64) -> QIcon:
-    """Generate a tray icon if .ico file is not found."""
+def _create_status_icon(color_hex: str, size: int = 64) -> QIcon:
+    """Generate a colored tray icon for status indication."""
     pixmap = QPixmap(size, size)
-    pixmap.fill(QColor(0, 0, 0, 255))
+    pixmap.fill(QColor(0, 0, 0, 0))
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     bg = QColor(color_hex)
@@ -83,15 +59,8 @@ class SystemTray(QSystemTrayIcon):
         super().__init__()
         self.drive_app = app
 
-        # Try to use the .ico file (much better on Windows)
         self._ico_path = _find_ico_path()
-        if self._ico_path:
-            log.info("Using tray icon: %s", self._ico_path)
-            self._base_icon = QIcon(self._ico_path)
-        else:
-            log.warning("Icon file not found, using generated fallback")
-            self._base_icon = _create_fallback_icon("#2196F3", 64)
-
+        self._base_icon = get_app_icon()
         self.setIcon(self._base_icon)
         self.setToolTip("EthOS Drive")
 
@@ -145,6 +114,16 @@ class SystemTray(QSystemTrayIcon):
 
         # Listen for update availability
         self.drive_app.update_available.connect(self._on_update_available)
+
+        menu.addSeparator()
+
+        open_log_action = QAction("Open Log File", menu)
+        open_log_action.triggered.connect(self._open_log_file)
+        menu.addAction(open_log_action)
+
+        restart_action = QAction("Restart", menu)
+        restart_action.triggered.connect(self._restart_app)
+        menu.addAction(restart_action)
 
         menu.addSeparator()
 
@@ -214,3 +193,31 @@ class SystemTray(QSystemTrayIcon):
         url = getattr(self, "_pending_update_url", "")
         if url:
             self.drive_app.download_and_install_update(url)
+
+    def _open_log_file(self):
+        """Open the log file in the default text editor."""
+        import platformdirs
+        from pathlib import Path
+        log_file = Path(platformdirs.user_log_dir("EthOS Drive", "EthOS")) / "ethos-drive.log"
+        if not log_file.exists():
+            self.showMessage("EthOS Drive", "Log file not found yet.",
+                             QSystemTrayIcon.MessageIcon.Warning, 3000)
+            return
+        if os.name == "nt":
+            os.startfile(str(log_file))
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", str(log_file)])
+
+    def _restart_app(self):
+        """Restart the application."""
+        import sys
+        log.info("User requested restart")
+        self.drive_app.disconnect()
+        executable = sys.executable
+        args = sys.argv[:]
+        if getattr(sys, "frozen", False):
+            # PyInstaller frozen app — re-launch the exe
+            os.execv(executable, [executable] + args[1:])
+        else:
+            os.execv(executable, [executable] + args)
