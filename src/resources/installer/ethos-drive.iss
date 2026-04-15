@@ -21,6 +21,9 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+CloseApplications=force
+RestartApplications=yes
+CloseApplicationsFilter=EthOS Drive.exe
 
 ; Installer appearance
 ;SetupIconFile=..\icons\ethos-drive.ico

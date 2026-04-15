@@ -105,6 +105,13 @@ class SystemTray(QSystemTrayIcon):
         settings_action.triggered.connect(self._open_settings)
         menu.addAction(settings_action)
 
+        self._update_action = QAction("Check for Updates", menu)
+        self._update_action.triggered.connect(self._check_updates)
+        menu.addAction(self._update_action)
+
+        # Listen for update availability
+        app.update_available.connect(self._on_update_available)
+
         menu.addSeparator()
 
         quit_action = QAction("Quit EthOS Drive", menu)
@@ -159,3 +166,18 @@ class SystemTray(QSystemTrayIcon):
         self._open_main_window()
         if hasattr(self._main_window, "show_settings_tab"):
             self._main_window.show_settings_tab()
+
+    def _check_updates(self):
+        self.drive_app.check_for_updates()
+
+    def _on_update_available(self, version: str, url: str, notes: str):
+        """Show update action in tray menu when an update is available."""
+        self._pending_update_url = url
+        self._update_action.setText(f"Update to v{version}...")
+        self._update_action.triggered.disconnect()
+        self._update_action.triggered.connect(self._install_pending_update)
+
+    def _install_pending_update(self):
+        url = getattr(self, "_pending_update_url", "")
+        if url:
+            self.drive_app.download_and_install_update(url)

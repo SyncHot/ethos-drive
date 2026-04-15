@@ -24,3 +24,6 @@ pydantic>=2.6.0
 
 # SSL certificates
 certifi>=2024.2.2
+
+# Version comparison for auto-updates
+packaging>=24.0

@@ -5,6 +5,7 @@ import os
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal, QTimer
+from PySide6.QtWidgets import QSystemTrayIcon
 
 from ethos_drive.config import Config, SyncTask
 from ethos_drive.sync.state import SyncStateDB
@@ -13,6 +14,8 @@ from ethos_drive.sync.watcher import FileWatcher
 from ethos_drive.api.client import EthosAPIClient
 from ethos_drive.api.realtime import RealtimeClient
 from ethos_drive.ui.tray import SystemTray
+from ethos_drive.updater import AutoUpdater
+from ethos_drive import __version__
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +26,7 @@ class EthosDriveApp(QObject):
     status_changed = Signal(str)       # 'idle', 'syncing', 'paused', 'error', 'offline'
     sync_progress = Signal(dict)       # {task_id, file, progress, speed}
     conflict_detected = Signal(dict)   # {task_id, local_path, remote_path, details}
+    update_available = Signal(str, str, str)  # version, download_url, notes
 
     def __init__(self):
         super().__init__()
@@ -36,6 +40,9 @@ class EthosDriveApp(QObject):
         self._status = "offline"
         self._paused = False
         self._mounted_drive = ""
+
+        self.updater = AutoUpdater(__version__)
+        self.updater.update_available.connect(self._on_update_available)
 
         self._sync_timer = QTimer()
         self._sync_timer.timeout.connect(self._periodic_sync)
@@ -53,7 +60,7 @@ class EthosDriveApp(QObject):
 
     def start(self, minimized: bool = False):
         """Initialize and start the application."""
-        log.info("EthOS Drive v%s starting", "1.0.0")
+        log.info("EthOS Drive v%s starting", __version__)
 
         self.tray = SystemTray(self)
         self.tray.show()
@@ -66,6 +73,10 @@ class EthosDriveApp(QObject):
 
         # Periodic full sync every 5 minutes as safety net
         self._sync_timer.start(5 * 60 * 1000)
+
+        # Check for updates on startup
+        if self.config.auto_update:
+            QTimer.singleShot(3000, self.check_for_updates)
 
     def show_login(self):
         """Show the login dialog."""
@@ -124,6 +135,30 @@ class EthosDriveApp(QObject):
             set_auto_start(self.config.auto_start)
         except Exception as e:
             log.error("Auto-start setting failed: %s", e)
+
+    def check_for_updates(self):
+        """Trigger a background update check."""
+        log.info("Checking for updates...")
+        self.updater.check_for_updates()
+
+    def _on_update_available(self, version: str, url: str, notes: str):
+        """Handle update-available signal."""
+        log.info("Update available: v%s", version)
+        self.update_available.emit(version, url, notes)
+        if self.tray:
+            self.tray.showMessage(
+                "EthOS Drive Update Available",
+                f"Version {version} is ready to download. Click tray icon for details.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+
+    def download_and_install_update(self, url: str):
+        """Download an update and install it."""
+        self.updater.download_update(url)
+        self.updater.update_downloaded.connect(
+            lambda path: self.updater.install_update(path)
+        )
 
     def _connect(self):
         """Connect to EthOS server."""

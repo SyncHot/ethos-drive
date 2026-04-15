@@ -238,6 +238,38 @@ class MainWindow(QMainWindow):
         log_form.addRow("Log level:", self._log_level)
         layout.addWidget(log_group)
 
+        # Updates
+        update_group = QGroupBox("Updates")
+        update_form = QFormLayout(update_group)
+
+        self._auto_update_cb = QCheckBox("Automatically check for updates")
+        self._auto_update_cb.setChecked(self.drive_app.config.auto_update)
+        self._auto_update_cb.toggled.connect(self._save_settings)
+        update_form.addRow(self._auto_update_cb)
+
+        update_row = QHBoxLayout()
+        self._check_update_btn = QPushButton("Check Now")
+        self._check_update_btn.setStyleSheet(
+            "QPushButton { background: #2196F3; color: white; border: none; padding: 6px 16px; "
+            "border-radius: 4px; } QPushButton:hover { background: #1976D2; }")
+        self._check_update_btn.clicked.connect(self._check_for_updates)
+        update_row.addWidget(self._check_update_btn)
+
+        from ethos_drive import __version__
+        self._version_label = QLabel(f"Current version: v{__version__}")
+        self._version_label.setStyleSheet("color: #888;")
+        update_row.addWidget(self._version_label)
+        update_row.addStretch()
+        update_form.addRow(update_row)
+
+        self._update_status_label = QLabel("")
+        update_form.addRow(self._update_status_label)
+
+        layout.addWidget(update_group)
+
+        # Wire update signals
+        self.drive_app.update_available.connect(self._on_update_available)
+
         layout.addStretch()
         return widget
 
@@ -320,6 +352,7 @@ class MainWindow(QMainWindow):
         cfg.show_notifications = self._notify_cb.isChecked()
         cfg.mount_as_drive = self._mount_drive_cb.isChecked()
         cfg.drive_letter = self._drive_letter_combo.currentData() or ""
+        cfg.auto_update = self._auto_update_cb.isChecked()
         cfg.max_concurrent_transfers = self._max_transfers.value()
         cfg.log_level = self._log_level.currentText()
         cfg.save()
@@ -340,6 +373,39 @@ class MainWindow(QMainWindow):
     def _reconnect(self):
         self.drive_app.disconnect()
         self.drive_app.show_login()
+
+    def _check_for_updates(self):
+        """Manual update check from settings."""
+        self._check_update_btn.setEnabled(False)
+        self._check_update_btn.setText("Checking...")
+        self._update_status_label.setText("")
+        self.drive_app.updater.no_update.connect(self._on_no_update)
+        self.drive_app.check_for_updates()
+
+    def _on_no_update(self):
+        self._check_update_btn.setEnabled(True)
+        self._check_update_btn.setText("Check Now")
+        self._update_status_label.setText("✓ You're up to date!")
+        self._update_status_label.setStyleSheet("color: #4CAF50;")
+        try:
+            self.drive_app.updater.no_update.disconnect(self._on_no_update)
+        except RuntimeError:
+            pass
+
+    def _on_update_available(self, version: str, url: str, notes: str):
+        """Show update info in settings tab."""
+        self._check_update_btn.setEnabled(True)
+        self._check_update_btn.setText("Check Now")
+        self._update_status_label.setText(f"⬆ Version {version} available!")
+        self._update_status_label.setStyleSheet("color: #2196F3; font-weight: bold;")
+
+        reply = QMessageBox.question(
+            self, "Update Available",
+            f"EthOS Drive v{version} is available.\n\n{notes[:300]}\n\nDownload and install now?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.drive_app.download_and_install_update(url)
 
     def show_activity_tab(self):
         self._tabs.setCurrentWidget(self._activity_widget)

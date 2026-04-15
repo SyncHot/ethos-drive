@@ -57,6 +57,7 @@ class Config(BaseModel):
     mount_as_drive: bool = True
     drive_letter: str = ""  # auto-detect if empty
     log_level: str = "INFO"
+    auto_update: bool = True
     max_concurrent_transfers: int = 3
     chunk_size_kb: int = 4096  # 4 MB chunks
 
