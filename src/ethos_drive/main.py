@@ -23,9 +23,13 @@ def main():
     app.setOrganizationName("EthOS")
     app.setQuitOnLastWindowClosed(False)
 
-    icon_path = os.path.join(os.path.dirname(__file__), "..", "resources", "icons", "ethos-drive.png")
-    if os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(icon_path))
+    # Set application icon — try .ico first (Windows), then .png
+    icon_dir = os.path.join(os.path.dirname(__file__), "..", "resources", "icons")
+    for icon_name in ("ethos-drive.ico", "ethos-drive.png"):
+        icon_path = os.path.join(icon_dir, icon_name)
+        if os.path.exists(icon_path):
+            app.setWindowIcon(QIcon(icon_path))
+            break
 
     start_minimized = "--minimized" in sys.argv
 

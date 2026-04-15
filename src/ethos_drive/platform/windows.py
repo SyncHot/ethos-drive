@@ -133,10 +133,12 @@ def mount_virtual_drive(folder_path: str, drive_letter: str = "") -> str:
         )
         log.info("Mounted %s as %s:", folder_path, drive_letter)
 
-        # Set custom label in registry so Explorer shows "EthOS Drive (E:)"
-        _set_drive_label(drive_letter, "EthOS Drive")
-        # Set drive icon
+        # Set custom label — Explorer shows "Ethos (E:)"
+        _set_drive_label(drive_letter, "Ethos")
+        # Set drive icon from our .ico file
         _set_drive_icon(drive_letter)
+        # Notify Explorer to refresh drive list
+        _notify_explorer_refresh()
 
         return drive_letter
     except subprocess.CalledProcessError as e:
@@ -175,31 +177,71 @@ def _set_drive_label(letter: str, label: str):
 
 
 def _remove_drive_label(letter: str):
-    """Remove custom drive label."""
+    """Remove custom drive label and icon."""
     try:
         import winreg
-        key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}\DefaultLabel"
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
-        key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}"
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+        base = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}"
+        for sub in ("DefaultLabel", "DefaultIcon"):
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, f"{base}\\{sub}")
+            except Exception:
+                pass
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, base)
+        except Exception:
+            pass
     except Exception:
         pass
 
 
 def _set_drive_icon(letter: str):
-    """Set a custom icon for the drive in Explorer."""
+    """Set a custom icon for the drive in Explorer using the .ico file."""
     try:
         import winreg
-        # Use the exe icon if frozen, otherwise skip
-        if not getattr(sys, "frozen", False):
+        icon_path = _find_icon_path()
+        if not icon_path:
+            log.debug("No icon file found for drive %s", letter)
             return
-        icon_path = sys.executable
         key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}\DefaultIcon"
         key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
-        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"{icon_path},0")
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, icon_path)
         winreg.CloseKey(key)
+        log.info("Drive icon set: %s -> %s", letter, icon_path)
     except Exception as e:
         log.debug("Drive icon failed: %s", e)
+
+
+def _find_icon_path() -> str:
+    """Find the .ico file path (works frozen and dev)."""
+    # Frozen (PyInstaller --onefile or --onedir)
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+        candidates = [
+            os.path.join(base, "resources", "icons", "ethos-drive.ico"),
+            os.path.join(base, "_internal", "resources", "icons", "ethos-drive.ico"),
+            # PyInstaller --onefile extracts to temp — icon is next to exe
+            sys.executable + ",0",  # use exe's embedded icon as fallback
+        ]
+        for c in candidates:
+            if c.endswith(",0") or os.path.isfile(c):
+                return c
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+        p = os.path.normpath(os.path.join(base, "..", "resources", "icons", "ethos-drive.ico"))
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+def _notify_explorer_refresh():
+    """Tell Explorer to refresh drive list after registry changes."""
+    try:
+        import ctypes
+        SHCNE_DRIVEADD = 0x00000100
+        SHCNF_PATH = 0x0005
+        ctypes.windll.shell32.SHChangeNotify(SHCNE_DRIVEADD, SHCNF_PATH, None, None)
+    except Exception:
+        pass
 
 
 def setup_virtual_drive_on_boot(folder_path: str, drive_letter: str):

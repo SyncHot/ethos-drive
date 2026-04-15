@@ -1,6 +1,7 @@
 """System tray icon and menu — the always-visible entry point for EthOS Drive."""
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
@@ -30,35 +31,48 @@ STATUS_LABELS = {
 }
 
 
-def _create_status_icon(color_hex: str, size: int = 64) -> QIcon:
-    """Generate a tray icon: white 'E' on colored solid background.
+def _find_ico_path() -> str:
+    """Find the ethos-drive.ico file (works both frozen and dev)."""
+    import sys as _sys
+    if getattr(_sys, "frozen", False):
+        # PyInstaller --onefile extracts to _MEIPASS temp dir
+        meipass = getattr(_sys, "_MEIPASS", "")
+        exe_dir = os.path.dirname(_sys.executable)
+        candidates = [
+            os.path.join(meipass, "resources", "icons", "ethos-drive.ico") if meipass else "",
+            os.path.join(exe_dir, "resources", "icons", "ethos-drive.ico"),
+            os.path.join(exe_dir, "_internal", "resources", "icons", "ethos-drive.ico"),
+        ]
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(base, "..", "resources", "icons", "ethos-drive.ico"),
+            os.path.join(base, "..", "..", "resources", "icons", "ethos-drive.ico"),
+        ]
+    for c in candidates:
+        if c:
+            p = os.path.normpath(c)
+            if os.path.isfile(p):
+                return p
+    return ""
 
-    Windows 11 system tray requires non-transparent icons for reliable display.
-    We paint a solid colored square with rounded corners and a white 'E'.
-    """
+
+def _create_fallback_icon(color_hex: str, size: int = 64) -> QIcon:
+    """Generate a tray icon if .ico file is not found."""
     pixmap = QPixmap(size, size)
-    # Solid black fill first (no transparency — Windows tray needs this)
     pixmap.fill(QColor(0, 0, 0, 255))
-
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-    # Full-size colored background (solid, no transparency)
     bg = QColor(color_hex)
     painter.setBrush(bg)
     painter.setPen(Qt.NoPen)
-    painter.drawRect(0, 0, size, size)
-
-    # White 'E' letter
+    painter.drawRoundedRect(2, 2, size - 4, size - 4, 6, 6)
     painter.setPen(QPen(QColor("#FFFFFF")))
-    font = QFont()
-    font.setFamily("Arial")
-    font.setPixelSize(int(size * 0.65))
+    font = QFont("Arial", int(size * 0.45))
     font.setBold(True)
     painter.setFont(font)
     painter.drawText(pixmap.rect(), Qt.AlignCenter, "E")
     painter.end()
-
     return QIcon(pixmap)
 
 
@@ -68,10 +82,17 @@ class SystemTray(QSystemTrayIcon):
     def __init__(self, app: "EthosDriveApp"):
         super().__init__()
         self.drive_app = app
-        self._status_icons = {k: _create_status_icon(v, 32) for k, v in STATUS_COLORS.items()}
 
-        # Set icon BEFORE building menu and showing
-        self.setIcon(self._status_icons["offline"])
+        # Try to use the .ico file (much better on Windows)
+        self._ico_path = _find_ico_path()
+        if self._ico_path:
+            log.info("Using tray icon: %s", self._ico_path)
+            self._base_icon = QIcon(self._ico_path)
+        else:
+            log.warning("Icon file not found, using generated fallback")
+            self._base_icon = _create_fallback_icon("#2196F3", 64)
+
+        self.setIcon(self._base_icon)
         self.setToolTip("EthOS Drive")
 
         self._build_menu()
@@ -134,13 +155,12 @@ class SystemTray(QSystemTrayIcon):
         self.setContextMenu(menu)
 
     def _update_status(self, status: str):
-        """Update tray icon and tooltip based on sync status."""
-        icon = self._status_icons.get(status, self._status_icons["offline"])
-        self.setIcon(icon)
-
+        """Update tray tooltip based on sync status."""
+        # Always use the same icon (.ico file has multiple sizes built in)
+        # Status is shown only in tooltip and menu label
         label = STATUS_LABELS.get(status, status)
-        self.setToolTip(f"EthOS Drive — {label}")
-        self._status_label.setText(f"EthOS Drive — {label}")
+        self.setToolTip(f"EthOS Drive - {label}")
+        self._status_label.setText(f"EthOS Drive - {label}")
 
         # Show connect when offline, hide when connected
         self._connect_action.setVisible(status in ("offline", "error"))

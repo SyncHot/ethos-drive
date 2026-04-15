@@ -8,8 +8,9 @@ from PySide6.QtWidgets import (
     QPushButton, QCheckBox, QComboBox, QSpinBox, QGroupBox,
     QFormLayout, QFileDialog, QTreeWidget, QTreeWidgetItem,
     QTabWidget, QWidget, QListWidget, QListWidgetItem, QMessageBox,
+    QApplication,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 
 from ethos_drive.config import SyncTask, FilterRule
@@ -274,88 +275,78 @@ class TaskEditorDialog(QDialog):
 
 
 class _RemoteBrowserDialog(QDialog):
-    """Tree browser dialog for selecting a remote folder from EthOS server."""
+    """Tree browser dialog for selecting a remote folder from EthOS server.
+
+    Uses native Windows styling (no forced dark theme) and ASCII-safe icons
+    so it works reliably across all Windows versions and DPI settings.
+    """
 
     def __init__(self, api: EthosAPIClient, initial_path: str = "/", parent=None):
         super().__init__(parent)
         self.api = api
         self.selected_path = initial_path or "/"
         self._setup_ui()
-        self._load_path("/")
+        # Load after dialog is fully constructed
+        QTimer.singleShot(100, lambda: self._load_path("/"))
 
     def _setup_ui(self):
         self.setWindowTitle("Select Remote Folder")
-        self.setMinimumSize(450, 400)
-        self.resize(500, 500)
+        self.setMinimumSize(480, 420)
+        self.resize(520, 520)
+        self.setModal(True)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(8)
 
         # Header
         header = QLabel("Select a folder from your EthOS home directory:")
-        header.setStyleSheet("font-size: 13px; margin-bottom: 4px;")
         layout.addWidget(header)
 
         # Current path display
         path_row = QHBoxLayout()
         path_row.addWidget(QLabel("Path:"))
-        self._path_label = QLineEdit("/")
-        self._path_label.setReadOnly(True)
-        self._path_label.setStyleSheet(
-            "QLineEdit { background: #1a1a2e; color: #90CAF9; border: 1px solid #333; "
-            "padding: 4px 8px; border-radius: 3px; font-family: monospace; }")
-        path_row.addWidget(self._path_label)
+        self._path_edit = QLineEdit("/")
+        self._path_edit.setReadOnly(True)
+        path_row.addWidget(self._path_edit)
         layout.addLayout(path_row)
 
         # Navigation buttons
         nav_row = QHBoxLayout()
-        self._up_btn = QPushButton("⬆ Parent Folder")
+        self._up_btn = QPushButton("<< Parent Folder")
         self._up_btn.clicked.connect(self._go_up)
         self._up_btn.setEnabled(False)
         nav_row.addWidget(self._up_btn)
 
-        self._home_btn = QPushButton("🏠 Home (/)")
+        self._home_btn = QPushButton("Home (/)")
         self._home_btn.clicked.connect(lambda: self._load_path("/"))
         nav_row.addWidget(self._home_btn)
 
-        self._refresh_btn = QPushButton("🔄 Refresh")
+        self._refresh_btn = QPushButton("Refresh")
         self._refresh_btn.clicked.connect(lambda: self._load_path(self.selected_path))
         nav_row.addWidget(self._refresh_btn)
 
         nav_row.addStretch()
         layout.addLayout(nav_row)
 
-        # Folder tree
-        self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Name", "Type", "Size"])
-        self._tree.setColumnWidth(0, 280)
-        self._tree.setColumnWidth(1, 60)
-        self._tree.setColumnWidth(2, 80)
-        self._tree.setRootIsDecorated(False)
-        self._tree.setAlternatingRowColors(True)
-        self._tree.setStyleSheet(
-            "QTreeWidget { background: #1e1e30; alternate-background-color: #24243a; "
-            "border: 1px solid #333; } "
-            "QTreeWidget::item { padding: 4px; } "
-            "QTreeWidget::item:selected { background: #2196F3; }")
-        self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
-        self._tree.itemClicked.connect(self._on_item_clicked)
-        layout.addWidget(self._tree)
+        # Folder list (simple QListWidget is more reliable on Windows than QTreeWidget)
+        self._folder_list = QListWidget()
+        self._folder_list.setAlternatingRowColors(True)
+        self._folder_list.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self._folder_list.itemClicked.connect(self._on_item_clicked)
+        layout.addWidget(self._folder_list)
 
         # Status
-        self._status = QLabel("")
-        self._status.setStyleSheet("color: #888; font-size: 11px;")
+        self._status = QLabel("Connecting...")
         layout.addWidget(self._status)
 
         # Buttons
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
-        self._select_current_btn = QPushButton("Select This Folder")
-        self._select_current_btn.setStyleSheet(
-            "QPushButton { background: #4CAF50; color: white; border: none; padding: 8px 20px; "
-            "border-radius: 4px; font-weight: bold; } QPushButton:hover { background: #388E3C; }")
-        self._select_current_btn.clicked.connect(self._select_current)
-        btn_row.addWidget(self._select_current_btn)
+        self._select_btn = QPushButton("Select This Folder")
+        self._select_btn.setDefault(True)
+        self._select_btn.clicked.connect(self._select_current)
+        btn_row.addWidget(self._select_btn)
 
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
@@ -364,72 +355,82 @@ class _RemoteBrowserDialog(QDialog):
 
     def _load_path(self, path: str):
         """Load directory contents from the server."""
-        self._tree.clear()
+        self._folder_list.clear()
         self.selected_path = path
-        self._path_label.setText(path)
+        self._path_edit.setText(path)
         self._up_btn.setEnabled(path != "/")
         self._status.setText("Loading...")
+        self._select_btn.setEnabled(False)
+
+        # Force UI update before blocking API call
+        QApplication.processEvents()
 
         try:
+            log.info("Browsing remote path: %s", path)
             data = self.api.browse(path)
+            log.info("Browse response: ok=%s, entries=%d",
+                     data.get("ok"), len(data.get("entries", [])))
+
             if data.get("error"):
                 self._status.setText(f"Error: {data['error']}")
+                self._select_btn.setEnabled(True)
                 return
 
             entries = data.get("entries", [])
-            dirs = [e for e in entries if e.get("is_dir")]
-            files = [e for e in entries if not e.get("is_dir")]
+            dirs = sorted([e for e in entries if e.get("is_dir")],
+                          key=lambda e: e["name"].lower())
+            files = sorted([e for e in entries if not e.get("is_dir")],
+                           key=lambda e: e["name"].lower())
 
-            # Show directories first
+            # Show directories first (these are navigable)
             for entry in dirs:
-                item = QTreeWidgetItem()
-                item.setText(0, f"📁  {entry['name']}")
-                item.setText(1, "Folder")
-                item.setText(2, "")
-                item.setData(0, Qt.UserRole, entry["path"])
-                item.setData(0, Qt.UserRole + 1, True)  # is_dir flag
-                self._tree.addTopLevelItem(item)
+                item = QListWidgetItem(f"[Folder]  {entry['name']}")
+                item.setData(Qt.UserRole, entry["path"])
+                item.setData(Qt.UserRole + 1, True)  # is_dir
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                self._folder_list.addItem(item)
 
-            # Then files (for reference — user sees what's in the folder)
+            # Then files (dimmed, not selectable as target)
             for entry in files:
-                item = QTreeWidgetItem()
-                item.setText(0, f"📄  {entry['name']}")
-                item.setText(1, "File")
-                item.setText(2, self._format_size(entry.get("size", 0)))
-                item.setData(0, Qt.UserRole, entry["path"])
-                item.setData(0, Qt.UserRole + 1, False)
-                item.setForeground(0, QColor("#888"))
-                item.setForeground(1, QColor("#888"))
-                item.setForeground(2, QColor("#888"))
-                self._tree.addTopLevelItem(item)
+                size_str = self._format_size(entry.get("size", 0))
+                item = QListWidgetItem(f"          {entry['name']}  ({size_str})")
+                item.setData(Qt.UserRole, entry["path"])
+                item.setData(Qt.UserRole + 1, False)
+                item.setForeground(QColor(128, 128, 128))
+                self._folder_list.addItem(item)
 
-            count = len(dirs)
+            dir_count = len(dirs)
             file_count = len(files)
             self._status.setText(
-                f"{count} folder{'s' if count != 1 else ''}, "
+                f"{dir_count} folder{'s' if dir_count != 1 else ''}, "
                 f"{file_count} file{'s' if file_count != 1 else ''}")
 
             if not entries:
                 self._status.setText("Empty folder")
 
-        except Exception as e:
-            log.error("Browse error: %s", e)
-            self._status.setText(f"Error: {e}")
+            self._select_btn.setEnabled(True)
 
-    def _on_item_double_clicked(self, item, column):
+        except Exception as e:
+            log.error("Browse error for path '%s': %s", path, e, exc_info=True)
+            self._status.setText(f"Error: {e}")
+            self._select_btn.setEnabled(True)
+
+    def _on_item_double_clicked(self, item):
         """Double-click on folder = navigate into it."""
-        is_dir = item.data(0, Qt.UserRole + 1)
+        is_dir = item.data(Qt.UserRole + 1)
         if is_dir:
-            path = item.data(0, Qt.UserRole)
+            path = item.data(Qt.UserRole)
             self._load_path(path)
 
-    def _on_item_clicked(self, item, column):
+    def _on_item_clicked(self, item):
         """Single click on folder = select it as target."""
-        is_dir = item.data(0, Qt.UserRole + 1)
+        is_dir = item.data(Qt.UserRole + 1)
         if is_dir:
-            path = item.data(0, Qt.UserRole)
+            path = item.data(Qt.UserRole)
             self.selected_path = path
-            self._path_label.setText(path)
+            self._path_edit.setText(path)
 
     def _go_up(self):
         """Navigate to parent directory."""
@@ -439,6 +440,8 @@ class _RemoteBrowserDialog(QDialog):
             if not parent:
                 parent = "/"
             self._load_path(parent)
+        else:
+            self._load_path("/")
 
     def _select_current(self):
         """Select the currently displayed folder."""
