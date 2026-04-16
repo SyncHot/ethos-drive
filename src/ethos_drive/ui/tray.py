@@ -167,7 +167,7 @@ class SystemTray(QSystemTrayIcon):
                 break
 
         for task in tasks:
-            local_dir = task.local_dir
+            local_dir = task.local_path
             act = QAction(f"📁  {task.name}", ctx_menu)
             act.triggered.connect(
                 lambda checked=False, p=local_dir: self._open_task_folder(p))
