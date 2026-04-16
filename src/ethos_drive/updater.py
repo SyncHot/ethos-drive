@@ -159,6 +159,8 @@ class AutoUpdater(QObject):
             log.error("Download failed: %s", result)
             self.download_failed.emit(result)
 
+    install_failed = Signal(str)  # error message
+
     def install_update(self, installer_path: str = ""):
         """Replace the running exe with the downloaded update and restart.
 
@@ -171,12 +173,16 @@ class AutoUpdater(QObject):
         """
         new_exe = installer_path or self._pending_installer
         if not new_exe or not os.path.isfile(new_exe):
-            log.error("No update file to install")
+            msg = "No update file to install"
+            log.error(msg)
+            self.install_failed.emit(msg)
             return
 
         current_exe = self._get_current_exe()
         if not current_exe:
-            log.error("Cannot determine current executable path — not a frozen app")
+            msg = "Cannot determine executable path — not a frozen app"
+            log.error(msg)
+            self.install_failed.emit(msg)
             return
 
         log.info("Self-update: %s -> %s", new_exe, current_exe)
@@ -191,11 +197,16 @@ class AutoUpdater(QObject):
                 ) if os.name == "nt" else 0,
                 close_fds=True,
             )
-            # Quit so the exe file lock is released
-            from PySide6.QtWidgets import QApplication
-            QApplication.quit()
+            # Hard-exit so the exe file lock is released immediately.
+            # QApplication.quit() doesn't always terminate when background
+            # threads (sync engine, websocket, watchers) are still alive.
+            log.info("Update script launched — force-exiting in 1s")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(500, lambda: os._exit(0))
         except Exception as e:
-            log.error("Failed to launch update script: %s", e)
+            msg = f"Failed to launch update script: {e}"
+            log.error(msg)
+            self.install_failed.emit(msg)
 
     # ------------------------------------------------------------------
     @staticmethod

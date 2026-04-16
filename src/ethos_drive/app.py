@@ -170,12 +170,15 @@ class EthosDriveApp(QObject):
         self.updater.download_progress.connect(self._update_dialog.set_progress)
         self.updater.update_downloaded.connect(self._on_update_ready)
         self.updater.download_failed.connect(self._on_update_failed)
+        self.updater.install_failed.connect(self._on_update_failed)
         self.updater.download_update(url)
 
     def _on_update_ready(self, path: str):
-        """Update downloaded — show installing state and launch installer."""
+        """Update downloaded — disconnect services, then install."""
         if hasattr(self, '_update_dialog') and self._update_dialog:
             self._update_dialog.set_installing()
+        # Disconnect sync engines/watchers first so threads stop
+        self.disconnect()
         self.updater.install_update(path)
 
     def _on_update_failed(self, error: str):
