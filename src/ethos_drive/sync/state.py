@@ -64,7 +64,9 @@ class SyncStateDB:
                 action      TEXT NOT NULL,
                 path        TEXT NOT NULL,
                 detail      TEXT,
-                success     INTEGER DEFAULT 1
+                success     INTEGER DEFAULT 1,
+                bytes_transferred INTEGER DEFAULT 0,
+                duration_ms INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS conflicts (
@@ -108,6 +110,16 @@ class SyncStateDB:
             CREATE INDEX IF NOT EXISTS idx_conflicts_task ON conflicts(task_id, status);
             CREATE INDEX IF NOT EXISTS idx_versions_path ON versions(task_id, path);
         """)
+        conn.commit()
+        self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection):
+        """Add columns to existing tables if missing (schema migration)."""
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sync_log)").fetchall()}
+        if "bytes_transferred" not in cols:
+            conn.execute("ALTER TABLE sync_log ADD COLUMN bytes_transferred INTEGER DEFAULT 0")
+        if "duration_ms" not in cols:
+            conn.execute("ALTER TABLE sync_log ADD COLUMN duration_ms INTEGER DEFAULT 0")
         conn.commit()
 
     # --- File State ---
@@ -197,21 +209,30 @@ class SyncStateDB:
     # --- Sync Log ---
 
     def log_action(self, task_id: str, action: str, path: str,
-                   detail: str = "", success: bool = True):
+                   detail: str = "", success: bool = True,
+                   bytes_transferred: int = 0, duration_ms: int = 0):
         """Record a sync action in the log."""
         self._conn.execute(
-            "INSERT INTO sync_log (task_id, timestamp, action, path, detail, success) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (task_id, time.time(), action, path, detail, int(success))
+            "INSERT INTO sync_log (task_id, timestamp, action, path, detail, success, "
+            "bytes_transferred, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, time.time(), action, path, detail, int(success),
+             bytes_transferred, duration_ms)
         )
         self._conn.commit()
 
-    def get_recent_log(self, task_id: str, limit: int = 100) -> list[dict]:
-        """Get recent sync log entries."""
-        rows = self._conn.execute(
-            "SELECT * FROM sync_log WHERE task_id = ? ORDER BY timestamp DESC LIMIT ?",
-            (task_id, limit)
-        ).fetchall()
+    def get_recent_log(self, task_id: str = None, limit: int = 200,
+                       offset: int = 0) -> list[dict]:
+        """Get recent sync log entries, optionally filtered by task."""
+        if task_id:
+            rows = self._conn.execute(
+                "SELECT * FROM sync_log WHERE task_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                (task_id, limit, offset)
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM sync_log ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                (limit, offset)
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def get_log_since(self, task_id: str, since: float) -> list[dict]:

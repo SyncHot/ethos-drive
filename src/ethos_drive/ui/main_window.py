@@ -20,6 +20,7 @@ from ethos_drive.ui.task_editor import TaskEditorDialog
 from ethos_drive.ui.activity import ActivityWidget
 from ethos_drive.ui.conflicts import ConflictsWidget
 from ethos_drive.ui.icons import get_app_icon
+from ethos_drive.ui import theme
 
 log = logging.getLogger(__name__)
 
@@ -42,11 +43,13 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(get_app_icon())
         self.setMinimumSize(700, 500)
         self.resize(850, 600)
+        self.setStyleSheet(theme.app_stylesheet())
 
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Status bar at top
         self._status_bar = self._create_status_bar()
@@ -75,32 +78,33 @@ class MainWindow(QMainWindow):
     def _create_status_bar(self) -> QFrame:
         """Create the top status bar."""
         frame = QFrame()
-        frame.setStyleSheet("QFrame { background: #1a1a2e; padding: 8px 16px; }")
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: {theme.BG_SURFACE};
+                border-bottom: 1px solid {theme.BORDER};
+            }}
+        """)
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setContentsMargins(20, 12, 20, 12)
 
         self._status_icon = QLabel("●")
-        self._status_icon.setStyleSheet("color: #9E9E9E; font-size: 18px;")
+        self._status_icon.setStyleSheet(f"color: {theme.TEXT_DISABLED}; font-size: 16px;")
         layout.addWidget(self._status_icon)
 
         self._status_text = QLabel("Not connected")
-        self._status_text.setStyleSheet("color: #ccc; font-size: 13px;")
+        self._status_text.setStyleSheet(f"color: {theme.TEXT_SECONDARY}; font-size: 13px;")
         layout.addWidget(self._status_text)
 
         layout.addStretch()
 
-        self._pause_btn = QPushButton("⏸ Pause")
-        self._pause_btn.setStyleSheet(
-            "QPushButton { background: #FF9800; color: white; border: none; padding: 6px 16px; "
-            "border-radius: 4px; font-weight: bold; } QPushButton:hover { background: #F57C00; }")
+        self._pause_btn = QPushButton("⏸  Pause")
+        self._pause_btn.setProperty("class", "flat")
         self._pause_btn.clicked.connect(self._toggle_pause)
         self._pause_btn.setVisible(False)
         layout.addWidget(self._pause_btn)
 
-        self._sync_now_btn = QPushButton("Sync Now")
-        self._sync_now_btn.setStyleSheet(
-            "QPushButton { background: #2196F3; color: white; border: none; padding: 6px 16px; "
-            "border-radius: 4px; } QPushButton:hover { background: #1976D2; }")
+        self._sync_now_btn = QPushButton("↻  Sync Now")
+        self._sync_now_btn.setProperty("class", "primary")
         self._sync_now_btn.clicked.connect(self.drive_app.sync_all)
         layout.addWidget(self._sync_now_btn)
 
@@ -110,13 +114,13 @@ class MainWindow(QMainWindow):
         """Create the sync tasks management tab."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
         # Toolbar
         toolbar = QHBoxLayout()
-        add_btn = QPushButton("+ Add Sync Task")
-        add_btn.setStyleSheet(
-            "QPushButton { background: #4CAF50; color: white; border: none; padding: 8px 16px; "
-            "border-radius: 4px; font-weight: bold; } QPushButton:hover { background: #388E3C; }")
+        add_btn = QPushButton("+  Add Sync Task")
+        add_btn.setProperty("class", "primary")
         add_btn.clicked.connect(self._add_task)
         toolbar.addWidget(add_btn)
         toolbar.addStretch()
@@ -125,6 +129,24 @@ class MainWindow(QMainWindow):
         # Task list
         self._task_list = QListWidget()
         self._task_list.setSpacing(4)
+        self._task_list.setStyleSheet(f"""
+            QListWidget {{
+                background: {theme.BG_SURFACE};
+                border: 1px solid {theme.BORDER};
+                border-radius: {theme.RADIUS};
+            }}
+            QListWidget::item {{
+                padding: 10px 14px;
+                border-bottom: 1px solid {theme.BORDER};
+            }}
+            QListWidget::item:selected {{
+                background: {theme.ACCENT_SUBTLE};
+                color: {theme.TEXT_PRIMARY};
+            }}
+            QListWidget::item:hover {{
+                background: {theme.BG_ELEVATED};
+            }}
+        """)
         self._task_list.itemDoubleClicked.connect(self._edit_task)
         layout.addWidget(self._task_list)
 
@@ -135,7 +157,7 @@ class MainWindow(QMainWindow):
         actions.addWidget(edit_btn)
 
         remove_btn = QPushButton("Remove")
-        remove_btn.setStyleSheet("color: #F44336;")
+        remove_btn.setStyleSheet(f"color: {theme.ERROR};")
         remove_btn.clicked.connect(self._remove_task)
         actions.addWidget(remove_btn)
 
@@ -205,7 +227,7 @@ class MainWindow(QMainWindow):
 
         if self.drive_app._mounted_drive:
             mounted_label = QLabel("✓ Visible in Explorer navigation pane")
-            mounted_label.setStyleSheet("color: #4CAF50;")
+            mounted_label.setStyleSheet(f"color: {theme.SUCCESS};")
             drive_form.addRow(mounted_label)
 
         layout.addWidget(drive_group)
@@ -243,15 +265,13 @@ class MainWindow(QMainWindow):
 
         update_row = QHBoxLayout()
         self._check_update_btn = QPushButton("Check Now")
-        self._check_update_btn.setStyleSheet(
-            "QPushButton { background: #2196F3; color: white; border: none; padding: 6px 16px; "
-            "border-radius: 4px; } QPushButton:hover { background: #1976D2; }")
+        self._check_update_btn.setProperty("class", "primary")
         self._check_update_btn.clicked.connect(self._check_for_updates)
         update_row.addWidget(self._check_update_btn)
 
         from ethos_drive import __version__
         self._version_label = QLabel(f"Current version: v{__version__}")
-        self._version_label.setStyleSheet("color: #888;")
+        self._version_label.setStyleSheet(f"color: {theme.TEXT_SECONDARY};")
         update_row.addWidget(self._version_label)
         update_row.addStretch()
         update_form.addRow(update_row)
@@ -268,31 +288,27 @@ class MainWindow(QMainWindow):
         return widget
 
     def _update_status(self, status: str):
-        colors = {
-            "idle": "#4CAF50", "syncing": "#2196F3",
-            "paused": "#FF9800", "error": "#F44336", "offline": "#9E9E9E",
-        }
-        labels = {
-            "idle": "Up to date", "syncing": "Syncing...",
-            "paused": "Paused", "error": "Error", "offline": "Not connected",
-        }
-        color = colors.get(status, "#9E9E9E")
-        self._status_icon.setStyleSheet(f"color: {color}; font-size: 18px;")
-        self._status_text.setText(labels.get(status, status))
+        # Handle offline:retry:N status format
+        retry_info = ""
+        base_status = status
+        if status.startswith("offline:retry:"):
+            retry_info = f" — retrying in {status.split(':')[2]}s"
+            base_status = "offline"
 
-        # Show/hide pause button
-        connected = status not in ("offline",)
+        color = theme.status_dot_style(base_status)
+        labels = {
+            "idle": "Up to date", "syncing": "Syncing…",
+            "paused": "Paused", "error": "Error", "offline": "Offline",
+        }
+        self._status_icon.setStyleSheet(f"color: {color}; font-size: 16px;")
+        self._status_text.setText(labels.get(base_status, base_status) + retry_info)
+
+        connected = base_status not in ("offline",)
         self._pause_btn.setVisible(connected)
-        if status == "paused":
-            self._pause_btn.setText("▶ Resume")
-            self._pause_btn.setStyleSheet(
-                "QPushButton { background: #4CAF50; color: white; border: none; padding: 6px 16px; "
-                "border-radius: 4px; font-weight: bold; } QPushButton:hover { background: #388E3C; }")
+        if base_status == "paused":
+            self._pause_btn.setText("▶  Resume")
         else:
-            self._pause_btn.setText("⏸ Pause")
-            self._pause_btn.setStyleSheet(
-                "QPushButton { background: #FF9800; color: white; border: none; padding: 6px 16px; "
-                "border-radius: 4px; font-weight: bold; } QPushButton:hover { background: #F57C00; }")
+            self._pause_btn.setText("⏸  Pause")
 
     def _toggle_pause(self):
         if self.drive_app.status == "paused":
@@ -397,7 +413,7 @@ class MainWindow(QMainWindow):
         self._check_update_btn.setEnabled(True)
         self._check_update_btn.setText("Check Now")
         self._update_status_label.setText("✓ You're up to date!")
-        self._update_status_label.setStyleSheet("color: #4CAF50;")
+        self._update_status_label.setStyleSheet(f"color: {theme.SUCCESS};")
         try:
             self.drive_app.updater.no_update.disconnect(self._on_no_update)
         except RuntimeError:
@@ -408,7 +424,7 @@ class MainWindow(QMainWindow):
         self._check_update_btn.setEnabled(True)
         self._check_update_btn.setText("Check Now")
         self._update_status_label.setText(f"⬆ Version {version} available!")
-        self._update_status_label.setStyleSheet("color: #2196F3; font-weight: bold;")
+        self._update_status_label.setStyleSheet(f"color: {theme.ACCENT}; font-weight: bold;")
 
         reply = QMessageBox.question(
             self, "Update Available",

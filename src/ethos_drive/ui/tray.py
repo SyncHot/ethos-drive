@@ -12,21 +12,22 @@ if TYPE_CHECKING:
     from ethos_drive.app import EthosDriveApp
 
 from ethos_drive.ui.icons import get_app_icon, _find_ico_path
+from ethos_drive.ui import theme
 
 log = logging.getLogger(__name__)
 
-# Status colors
+# Status colors (using theme palette)
 STATUS_COLORS = {
-    "idle":     "#4CAF50",   # Green
-    "syncing":  "#2196F3",   # Blue
-    "paused":   "#FF9800",   # Orange
-    "error":    "#F44336",   # Red
-    "offline":  "#9E9E9E",   # Gray
+    "idle":     theme.SUCCESS,
+    "syncing":  theme.ACCENT,
+    "paused":   theme.WARNING,
+    "error":    theme.ERROR,
+    "offline":  theme.TEXT_DISABLED,
 }
 
 STATUS_LABELS = {
     "idle":     "Up to date",
-    "syncing":  "Syncing...",
+    "syncing":  "Syncing…",
     "paused":   "Paused",
     "error":    "Error — click for details",
     "offline":  "Not connected",
@@ -94,6 +95,10 @@ class SystemTray(QSystemTrayIcon):
 
         menu.addSeparator()
 
+        # Per-task folder shortcuts
+        self._folder_actions: list[QAction] = []
+        self._rebuild_folder_actions(menu)
+
         open_action = QAction("Open EthOS Drive", menu)
         open_action.triggered.connect(self._open_main_window)
         menu.addAction(open_action)
@@ -133,20 +138,84 @@ class SystemTray(QSystemTrayIcon):
 
         self.setContextMenu(menu)
 
+    def _rebuild_folder_actions(self, menu: QMenu | None = None):
+        """Add a 'Open <task> folder' action for each sync task."""
+        ctx_menu = menu or self.contextMenu()
+        if not ctx_menu:
+            return
+
+        # Remove previous folder actions
+        for act in self._folder_actions:
+            ctx_menu.removeAction(act)
+        self._folder_actions.clear()
+
+        tasks = self.drive_app.config.sync_tasks
+        if not tasks:
+            return
+
+        # Find insert position: after the separator following Pause action
+        actions = ctx_menu.actions()
+        insert_before = None
+        found_pause = False
+        for i, act in enumerate(actions):
+            if act is self._pause_action:
+                found_pause = True
+            elif found_pause and act.isSeparator():
+                # The separator after pause — insert after it
+                if i + 1 < len(actions):
+                    insert_before = actions[i + 1]
+                break
+
+        for task in tasks:
+            local_dir = task.local_dir
+            act = QAction(f"📁  {task.name}", ctx_menu)
+            act.triggered.connect(
+                lambda checked=False, p=local_dir: self._open_task_folder(p))
+            if insert_before:
+                ctx_menu.insertAction(insert_before, act)
+            else:
+                ctx_menu.addAction(act)
+            self._folder_actions.append(act)
+
+        # Add separator after folder actions
+        if self._folder_actions and insert_before:
+            sep = ctx_menu.insertSeparator(insert_before)
+            self._folder_actions.append(sep)
+
+    def _open_task_folder(self, path: str):
+        """Open a sync task folder in the system file manager."""
+        if not os.path.isdir(path):
+            self.showMessage("EthOS Drive", f"Folder not found:\n{path}",
+                             QSystemTrayIcon.MessageIcon.Warning, 3000)
+            return
+        if os.name == "nt":
+            os.startfile(path)
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", path])
+
     def _update_status(self, status: str):
         """Update tray tooltip based on sync status."""
-        # Always use the same icon (.ico file has multiple sizes built in)
-        # Status is shown only in tooltip and menu label
-        label = STATUS_LABELS.get(status, status)
-        self.setToolTip(f"EthOS Drive - {label}")
-        self._status_label.setText(f"EthOS Drive - {label}")
+        base = status.split(":")[0] if ":" in status else status
+        label = STATUS_LABELS.get(base, base)
+
+        # Show reconnect info in tooltip
+        if status.startswith("offline:retry:"):
+            try:
+                attempt = int(status.split(":")[-1])
+                label = f"Offline — reconnecting (attempt {attempt})"
+            except ValueError:
+                pass
+
+        self.setToolTip(f"EthOS Drive — {label}")
+        self._status_label.setText(f"EthOS Drive — {label}")
 
         # Show connect when offline, hide when connected
-        self._connect_action.setVisible(status in ("offline", "error"))
-        self._sync_now_action.setEnabled(status not in ("offline",))
+        self._connect_action.setVisible(base in ("offline", "error"))
+        self._sync_now_action.setEnabled(base not in ("offline",))
 
         # Update pause button text
-        if status == "paused":
+        if base == "paused":
             self._pause_action.setText("Resume Syncing")
         else:
             self._pause_action.setText("Pause Syncing")

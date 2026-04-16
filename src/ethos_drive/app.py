@@ -29,6 +29,8 @@ class EthosDriveApp(QObject):
     conflict_detected = Signal(dict)   # {task_id, local_path, remote_path, details}
     update_available = Signal(str, str, str)  # version, download_url, notes
 
+    _RECONNECT_DELAYS = [5, 10, 30, 60]  # exponential backoff seconds
+
     def __init__(self):
         super().__init__()
         self.config = Config.load()
@@ -42,6 +44,10 @@ class EthosDriveApp(QObject):
         self._paused = False
         self._mounted_drive = ""
         self._sync_lock = threading.Lock()
+        self._reconnect_attempt = 0
+        self._reconnect_timer = QTimer()
+        self._reconnect_timer.setSingleShot(True)
+        self._reconnect_timer.timeout.connect(self._try_reconnect)
 
         self.updater = AutoUpdater(__version__)
         self.updater.update_available.connect(self._on_update_available)
@@ -102,24 +108,28 @@ class EthosDriveApp(QObject):
         return folder
 
     def _mount_drive(self):
-        """Add EthOS Drive shortcut to Explorer navigation pane."""
+        """Add EthOS Drive shortcuts to Explorer navigation pane."""
         if not self.config.mount_as_drive or os.name != "nt":
             return
         try:
             from ethos_drive.platform.windows import add_explorer_shortcut
-            folder = self._get_sync_folder()
-            if add_explorer_shortcut(folder):
-                self._mounted_drive = "nav"  # flag that shortcut is active
-                log.info("Explorer shortcut added -> %s", folder)
+            for task in self.config.sync_tasks:
+                if task.enabled:
+                    if add_explorer_shortcut(task.local_path, task_id=task.id,
+                                             display_name=task.name):
+                        log.info("Explorer shortcut added for '%s' -> %s",
+                                 task.name, task.local_path)
+            self._mounted_drive = "nav"
         except Exception as e:
             log.error("Failed to add Explorer shortcut: %s", e)
 
     def _unmount_drive(self):
-        """Remove EthOS Drive shortcut from Explorer."""
+        """Remove EthOS Drive shortcuts from Explorer."""
         if self._mounted_drive:
             try:
                 from ethos_drive.platform.windows import remove_explorer_shortcut
-                remove_explorer_shortcut()
+                for task in self.config.sync_tasks:
+                    remove_explorer_shortcut(task_id=task.id)
                 self._mounted_drive = ""
             except Exception as e:
                 log.error("Failed to remove Explorer shortcut: %s", e)
@@ -198,6 +208,7 @@ class EthosDriveApp(QObject):
 
             if not self.api_client.token:
                 self.status = "error"
+                self._schedule_reconnect()
                 return
 
             # Start real-time connection
@@ -206,11 +217,13 @@ class EthosDriveApp(QObject):
                 token=self.api_client.token,
             )
             self.realtime.file_changed.connect(self._on_remote_change)
+            self.realtime.disconnected.connect(self._on_server_disconnect)
             self.realtime.connect()
 
             # Initialize sync engines for each task
             self._init_sync_tasks()
 
+            self._reconnect_attempt = 0
             self.status = "idle"
             log.info("Connected to %s", self.config.server_url)
 
@@ -225,7 +238,36 @@ class EthosDriveApp(QObject):
 
         except Exception as e:
             log.error("Connection failed: %s", e)
-            self.status = "error"
+            self.status = "offline"
+            self._schedule_reconnect()
+
+    def _schedule_reconnect(self):
+        """Schedule a reconnection attempt with exponential backoff."""
+        if self._paused:
+            return
+        idx = min(self._reconnect_attempt, len(self._RECONNECT_DELAYS) - 1)
+        delay = self._RECONNECT_DELAYS[idx]
+        self._reconnect_attempt += 1
+        log.info("Reconnect attempt %d in %ds", self._reconnect_attempt, delay)
+        self.status_changed.emit(f"offline:retry:{delay}")
+        self._reconnect_timer.start(delay * 1000)
+
+    def _try_reconnect(self):
+        """Attempt to reconnect to the server."""
+        if self._paused:
+            return
+        log.info("Attempting reconnect #%d ...", self._reconnect_attempt)
+        self._connect()
+
+    def _on_server_disconnect(self):
+        """Handle server/network disconnect — pause engines, schedule retry."""
+        log.warning("Server connection lost, pausing sync engines")
+        for engine in self.engines.values():
+            engine.transfer_mgr.pause()
+        for watcher in self.watchers.values():
+            watcher.pause()
+        self.status = "offline"
+        self._schedule_reconnect()
 
     def _on_token_refreshed(self, new_token: str):
         """Called by API client after successful automatic re-authentication."""
@@ -390,6 +432,7 @@ class EthosDriveApp(QObject):
 
     def disconnect(self):
         """Disconnect from server."""
+        self._reconnect_timer.stop()
         for task_id in list(self.engines.keys()):
             self.stop_task(task_id)
         if self.realtime:

@@ -85,6 +85,48 @@ class SyncEngine(QObject):
             max_upload_kbps=task.max_upload_kbps,
             max_download_kbps=task.max_download_kbps,
         )
+        self.transfer_mgr.progress_updated.connect(self._on_transfer_progress)
+
+    def _on_transfer_progress(self, info: dict):
+        """Forward TransferManager progress to engine signal."""
+        self.progress.emit({
+            "phase": "syncing",
+            "file": info.get("path", ""),
+            "action": info.get("direction", "transfer"),
+            "percent": info.get("percent", 0),
+            "speed": info.get("speed_bps", 0),
+            "eta": info.get("eta_seconds", 0),
+            "transferred": info.get("transferred", 0),
+            "total": info.get("total", 0),
+        })
+
+    def _make_progress_cb(self, path: str, direction: str):
+        """Create progress callback for direct API upload/download calls."""
+        from .transfer import TransferProgress
+        prog = TransferProgress(path, 0, direction)
+        with self.transfer_mgr._lock:
+            self.transfer_mgr._active[path] = prog
+
+        def cb(transferred, total):
+            prog.transferred_bytes = transferred
+            prog.total_bytes = total
+            prog._record_sample()
+            self.progress.emit({
+                "phase": "syncing",
+                "file": path,
+                "action": direction,
+                "percent": round(prog.percent, 1),
+                "speed": int(prog.speed_bps),
+                "eta": int(prog.eta_seconds),
+                "transferred": transferred,
+                "total": total,
+            })
+
+        def cleanup():
+            with self.transfer_mgr._lock:
+                self.transfer_mgr._active.pop(path, None)
+
+        return cb, cleanup
 
     def full_sync(self):
         """Perform a complete two-way sync."""
@@ -368,9 +410,16 @@ class SyncEngine(QObject):
                     existing["remote_xxhash"], existing["remote_mtime_ns"],
                 )
 
-            resp = self.api.upload_file(local_abs, remote_path)
+            progress_cb, cleanup = self._make_progress_cb(path, "upload")
+            t0 = time.time()
+            try:
+                resp = self.api.upload_file(local_abs, remote_path,
+                                            progress_callback=progress_cb)
+            finally:
+                cleanup()
 
             local_fp = content_fingerprint(local_abs)
+            file_size = local_fp["size"] if local_fp else 0
             if local_fp:
                 # Use server-returned xxhash for remote state (content is same)
                 remote_xxhash = resp.get("xxhash", local_fp["xxhash"]) if isinstance(resp, dict) else local_fp["xxhash"]
@@ -381,7 +430,9 @@ class SyncEngine(QObject):
                                     remote_size=local_fp["size"],
                                     remote_mtime_ns=local_fp["mtime_ns"],
                                     remote_xxhash=remote_xxhash)
-            self.db.log_action(self.task.id, "upload", path)
+            self.db.log_action(self.task.id, "upload", path,
+                               bytes_transferred=file_size,
+                               duration_ms=int((time.time() - t0) * 1000))
             stats["uploaded"] += 1
 
         elif action.action == SyncAction.DOWNLOAD:
@@ -400,10 +451,17 @@ class SyncEngine(QObject):
                         path, fp["size"], fp["xxhash"], fp["mtime_ns"],
                     )
 
-            self.api.download_file(remote_path, local_abs)
+            progress_cb, cleanup = self._make_progress_cb(path, "download")
+            t0 = time.time()
+            try:
+                self.api.download_file(remote_path, local_abs,
+                                       progress_callback=progress_cb)
+            finally:
+                cleanup()
 
             fp = content_fingerprint(local_abs)
             remote_fp = action.details.get("remote_fp", {})
+            file_size = fp["size"] if fp else 0
             if fp:
                 self.db.mark_synced(self.task.id, path,
                                     local_size=fp["size"],
@@ -412,7 +470,9 @@ class SyncEngine(QObject):
                                     remote_size=remote_fp.get("size", fp["size"]),
                                     remote_mtime_ns=remote_fp.get("mtime_ns", fp["mtime_ns"]),
                                     remote_xxhash=remote_fp.get("xxhash", fp["xxhash"]))
-            self.db.log_action(self.task.id, "download", path)
+            self.db.log_action(self.task.id, "download", path,
+                               bytes_transferred=file_size,
+                               duration_ms=int((time.time() - t0) * 1000))
             stats["downloaded"] += 1
 
         elif action.action == SyncAction.DELETE_LOCAL:

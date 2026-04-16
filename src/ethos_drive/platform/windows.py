@@ -68,15 +68,28 @@ def get_default_sync_folder() -> str:
 # sidebar (navigation pane) — no drive letter needed.
 
 # Fixed CLSID for our shell folder — generated once, never changes.
+# Used as the base; per-task CLSIDs are derived deterministically.
 _CLSID = "{7B3A8E2D-1F4C-4A9B-B5D6-8E2F3C4A5B6D}"
 
 
-def add_explorer_shortcut(folder_path: str) -> bool:
+def _clsid_for_task(task_id: str = None) -> str:
+    """Return a deterministic CLSID for a task, or the default one."""
+    if not task_id:
+        return _CLSID
+    import uuid
+    ns = uuid.UUID(_CLSID.strip("{}"))
+    derived = uuid.uuid5(ns, task_id)
+    return "{" + str(derived).upper() + "}"
+
+
+def add_explorer_shortcut(folder_path: str, task_id: str = None,
+                          display_name: str = "EthOS Drive") -> bool:
     """Register EthOS Drive as a navigation pane entry in Windows Explorer.
 
     Creates a CLSID Shell Folder that appears in the Explorer sidebar
     (like OneDrive, Dropbox, Google Drive) with our icon.
     Persists across reboots — no subst or drive letter needed.
+    If task_id is provided, creates a unique shortcut per sync task.
     Returns True on success.
     """
     if os.name != "nt":
@@ -84,15 +97,17 @@ def add_explorer_shortcut(folder_path: str) -> bool:
 
     folder_path = os.path.abspath(folder_path)
     os.makedirs(folder_path, exist_ok=True)
+    clsid = _clsid_for_task(task_id)
+    label = display_name or "EthOS Drive"
 
     try:
         import winreg
         icon_path = _find_icon_path()
 
         # 1. Register the CLSID under HKCU\Software\Classes\CLSID\{...}
-        clsid_key_path = rf"Software\Classes\CLSID\{_CLSID}"
+        clsid_key_path = rf"Software\Classes\CLSID\{clsid}"
         key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, clsid_key_path)
-        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "EthOS Drive")
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, label)
         # SortOrderIndex: 0x42 puts it near OneDrive in nav pane
         winreg.SetValueEx(key, "SortOrderIndex", 0, winreg.REG_DWORD, 0x42)
         winreg.SetValueEx(key, "System.IsPinnedToNameSpaceTree", 0, winreg.REG_DWORD, 1)
@@ -131,29 +146,31 @@ def add_explorer_shortcut(folder_path: str) -> bool:
         winreg.CloseKey(bag_key)
 
         # 6. Register in Explorer's namespace to show in navigation pane
-        ns_key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{_CLSID}"
+        ns_key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{clsid}"
         ns_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, ns_key_path)
-        winreg.SetValueEx(ns_key, "", 0, winreg.REG_SZ, "EthOS Drive")
+        winreg.SetValueEx(ns_key, "", 0, winreg.REG_SZ, label)
         winreg.CloseKey(ns_key)
 
         # 7. Hide from Desktop (only show in nav pane, not on desktop)
         hide_key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"
         hide_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, hide_key_path)
-        winreg.SetValueEx(hide_key, _CLSID, 0, winreg.REG_DWORD, 1)
+        winreg.SetValueEx(hide_key, clsid, 0, winreg.REG_DWORD, 1)
         winreg.CloseKey(hide_key)
 
         _notify_explorer_refresh()
-        log.info("Explorer shortcut added: EthOS Drive -> %s", folder_path)
+        log.info("Explorer shortcut added: %s -> %s", label, folder_path)
         return True
     except Exception as e:
         log.error("Failed to add Explorer shortcut: %s", e)
         return False
 
 
-def remove_explorer_shortcut():
+def remove_explorer_shortcut(task_id: str = None):
     """Remove EthOS Drive from Explorer navigation pane."""
     if os.name != "nt":
         return
+
+    clsid = _clsid_for_task(task_id)
 
     try:
         import winreg
@@ -162,7 +179,7 @@ def remove_explorer_shortcut():
         try:
             winreg.DeleteKey(
                 winreg.HKEY_CURRENT_USER,
-                rf"Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{_CLSID}",
+                rf"Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{clsid}",
             )
         except Exception:
             pass
@@ -171,13 +188,13 @@ def remove_explorer_shortcut():
         try:
             hide_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"
             hide_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, hide_path, 0, winreg.KEY_SET_VALUE)
-            winreg.DeleteValue(hide_key, _CLSID)
+            winreg.DeleteValue(hide_key, clsid)
             winreg.CloseKey(hide_key)
         except Exception:
             pass
 
         # Remove CLSID tree (deepest first)
-        clsid_base = rf"Software\Classes\CLSID\{_CLSID}"
+        clsid_base = rf"Software\Classes\CLSID\{clsid}"
         for sub in [
             r"\Instance\InitPropertyBag",
             r"\Instance",
@@ -206,15 +223,16 @@ def remove_explorer_shortcut():
         log.debug("Shortcut removal: %s", e)
 
 
-def is_explorer_shortcut_installed() -> bool:
+def is_explorer_shortcut_installed(task_id: str = None) -> bool:
     """Check if the EthOS Drive shortcut is in Explorer nav pane."""
     if os.name != "nt":
         return False
+    clsid = _clsid_for_task(task_id)
     try:
         import winreg
         winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
-            rf"Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{_CLSID}",
+            rf"Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{clsid}",
             0, winreg.KEY_READ,
         )
         return True

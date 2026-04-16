@@ -14,7 +14,9 @@ log = logging.getLogger(__name__)
 
 
 class TransferProgress:
-    """Tracks progress of a single file transfer."""
+    """Tracks progress of a single file transfer with rolling speed window."""
+
+    _WINDOW_SEC = 5.0  # sliding window for speed calculation
 
     def __init__(self, path: str, total_bytes: int, direction: str):
         self.path = path
@@ -23,6 +25,13 @@ class TransferProgress:
         self.transferred_bytes = 0
         self.start_time = time.time()
         self.last_update = self.start_time
+        self._samples: list[tuple[float, int]] = []  # (timestamp, bytes_at_that_point)
+
+    def _record_sample(self):
+        now = time.time()
+        self._samples.append((now, self.transferred_bytes))
+        cutoff = now - self._WINDOW_SEC
+        self._samples = [(t, b) for t, b in self._samples if t >= cutoff]
 
     @property
     def percent(self) -> float:
@@ -32,8 +41,14 @@ class TransferProgress:
 
     @property
     def speed_bps(self) -> float:
-        elapsed = time.time() - self.start_time
-        return self.transferred_bytes / elapsed if elapsed > 0 else 0
+        """Rolling average speed over the last few seconds."""
+        if len(self._samples) < 2:
+            elapsed = time.time() - self.start_time
+            return self.transferred_bytes / elapsed if elapsed > 0.1 else 0
+        oldest_t, oldest_b = self._samples[0]
+        newest_t, newest_b = self._samples[-1]
+        dt = newest_t - oldest_t
+        return (newest_b - oldest_b) / dt if dt > 0.1 else 0
 
     @property
     def eta_seconds(self) -> float:
@@ -185,6 +200,7 @@ class TransferManager(QObject):
         def on_progress(transferred, total):
             progress.transferred_bytes = transferred
             progress.total_bytes = total
+            progress._record_sample()
             self.progress_updated.emit(progress.as_dict())
             self._throttle(transferred, progress.start_time, self.max_upload_kbps)
 
@@ -198,6 +214,7 @@ class TransferManager(QObject):
         def on_progress(transferred, total):
             progress.transferred_bytes = transferred
             progress.total_bytes = total
+            progress._record_sample()
             self.progress_updated.emit(progress.as_dict())
             self._throttle(transferred, progress.start_time, self.max_download_kbps)
 
