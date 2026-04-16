@@ -1,4 +1,12 @@
-"""Auto-updater — checks GitHub Releases for new versions and applies updates."""
+"""Auto-updater — checks GitHub Releases for new versions and applies updates.
+
+Update flow (Windows, --onefile PyInstaller):
+  1. Download new .exe to a temp file
+  2. Write a tiny .cmd script that waits for our process to die,
+     copies the new exe over the old one, starts it, and cleans up
+  3. Launch the .cmd script as a fully detached process
+  4. Quit the current app (releases file lock + mutex)
+"""
 
 import logging
 import os
@@ -13,7 +21,6 @@ log = logging.getLogger(__name__)
 
 GITHUB_REPO = "SyncHot/ethos-drive"
 RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-ASSET_NAME = "EthOS.Drive.exe"
 
 
 class _UpdateCheckWorker(QThread):
@@ -51,7 +58,7 @@ class _UpdateCheckWorker(QThread):
                 self.result.emit(False, tag, "", "")
                 return
 
-            # Find the installer asset
+            # Find the exe asset
             download_url = ""
             for asset in data.get("assets", []):
                 name = asset.get("name", "")
@@ -153,21 +160,94 @@ class AutoUpdater(QObject):
             self.download_failed.emit(result)
 
     def install_update(self, installer_path: str = ""):
-        """Launch the installer and quit the app."""
-        path = installer_path or self._pending_installer
-        if not path or not os.path.isfile(path):
-            log.error("No installer to run")
+        """Replace the running exe with the downloaded update and restart.
+
+        Strategy (Windows --onefile PyInstaller):
+          • Write a small .cmd script to a temp file
+          • The script polls until our PID is gone (exe file unlocked)
+          • Copies the new exe over the old one
+          • Launches the new exe with --minimized
+          • Deletes itself
+        """
+        new_exe = installer_path or self._pending_installer
+        if not new_exe or not os.path.isfile(new_exe):
+            log.error("No update file to install")
             return
 
-        log.info("Launching installer: %s", path)
+        current_exe = self._get_current_exe()
+        if not current_exe:
+            log.error("Cannot determine current executable path — not a frozen app")
+            return
+
+        log.info("Self-update: %s -> %s", new_exe, current_exe)
         try:
-            # /SILENT = no UI, /CLOSEAPPLICATIONS = close running instance
+            script = self._write_update_script(new_exe, current_exe)
+            # Launch the updater script fully detached
             subprocess.Popen(
-                [path, "/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"],
-                creationflags=subprocess.DETACHED_PROCESS if os.name == "nt" else 0,
+                ["cmd.exe", "/c", script],
+                creationflags=(
+                    subprocess.DETACHED_PROCESS
+                    | subprocess.CREATE_NO_WINDOW
+                ) if os.name == "nt" else 0,
+                close_fds=True,
             )
-            # Quit the app so installer can replace files
+            # Quit so the exe file lock is released
             from PySide6.QtWidgets import QApplication
             QApplication.quit()
         except Exception as e:
-            log.error("Failed to launch installer: %s", e)
+            log.error("Failed to launch update script: %s", e)
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _get_current_exe() -> str:
+        """Return the path to the currently running frozen executable (or '')."""
+        if getattr(sys, "frozen", False):
+            return sys.executable
+        return ""
+
+    @staticmethod
+    def _write_update_script(new_exe: str, current_exe: str) -> str:
+        """Write a .cmd batch script that replaces the exe after we exit."""
+        script_path = os.path.join(
+            tempfile.gettempdir(), "ethos_drive_update.cmd",
+        )
+        pid = os.getpid()
+        with open(script_path, "w") as f:
+            f.write(f"""@echo off
+setlocal enabledelayedexpansion
+set "NEW={new_exe}"
+set "OLD={current_exe}"
+
+REM --- Wait for the old process to exit ---
+set TRIES=0
+:wait
+timeout /t 2 /nobreak > nul
+tasklist /fi "PID eq {pid}" 2>nul | find /i "{pid}" >nul
+if not errorlevel 1 (
+    set /a TRIES+=1
+    if !TRIES! LSS 15 goto wait
+    exit /b 1
+)
+
+REM Grace period for file handle release
+timeout /t 1 /nobreak > nul
+
+REM --- Replace the exe (retry on lingering lock) ---
+set TRIES=0
+:copy
+copy /y "%NEW%" "%OLD%" > nul 2>&1
+if not errorlevel 1 goto ok
+set /a TRIES+=1
+if !TRIES! LSS 10 (
+    timeout /t 2 /nobreak > nul
+    goto copy
+)
+exit /b 1
+
+:ok
+start "" "%OLD%" --minimized
+del "%NEW%" > nul 2>&1
+(goto) 2>nul & del "%~f0"
+""")
+        log.info("Update script written: %s", script_path)
+        return script_path

@@ -68,8 +68,8 @@ class UpdateProgressDialog(QDialog):
         self._status.setText(f"{percent}%")
 
     def set_installing(self):
-        """Switch to 'installing' state."""
-        self._title.setText("Installing update...")
+        """Switch to 'applying update' state."""
+        self._title.setText("Applying update...")
         self._bar.setRange(0, 0)  # indeterminate
         self._status.setText("The app will restart automatically.")
 
