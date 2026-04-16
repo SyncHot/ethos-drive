@@ -222,12 +222,20 @@ class AutoUpdater(QObject):
         script_path = os.path.join(
             tempfile.gettempdir(), "ethos_drive_update.cmd",
         )
+        log_path = os.path.join(
+            tempfile.gettempdir(), "ethos_drive_update.log",
+        )
         pid = os.getpid()
         with open(script_path, "w") as f:
             f.write(f"""@echo off
 setlocal enabledelayedexpansion
 set "NEW={new_exe}"
 set "OLD={current_exe}"
+set "LOG={log_path}"
+
+echo [%date% %time%] Update script started (PID to wait for: {pid}) > "%LOG%"
+echo [%date% %time%] NEW=%NEW% >> "%LOG%"
+echo [%date% %time%] OLD=%OLD% >> "%LOG%"
 
 REM --- Wait for the old process to exit ---
 set TRIES=0
@@ -236,9 +244,13 @@ timeout /t 2 /nobreak > nul
 tasklist /fi "PID eq {pid}" 2>nul | find /i "{pid}" >nul
 if not errorlevel 1 (
     set /a TRIES+=1
+    echo [%date% %time%] Waiting for PID {pid} to exit... attempt !TRIES!/15 >> "%LOG%"
     if !TRIES! LSS 15 goto wait
+    echo [%date% %time%] FAIL: Process {pid} did not exit after 30s >> "%LOG%"
     exit /b 1
 )
+
+echo [%date% %time%] Process exited >> "%LOG%"
 
 REM Grace period for file handle release
 timeout /t 1 /nobreak > nul
@@ -249,15 +261,20 @@ set TRIES=0
 copy /y "%NEW%" "%OLD%" > nul 2>&1
 if not errorlevel 1 goto ok
 set /a TRIES+=1
+echo [%date% %time%] Copy attempt !TRIES!/10 failed (file locked?) >> "%LOG%"
 if !TRIES! LSS 10 (
     timeout /t 2 /nobreak > nul
     goto copy
 )
+echo [%date% %time%] FAIL: Could not copy after 10 attempts >> "%LOG%"
 exit /b 1
 
 :ok
+echo [%date% %time%] Copy succeeded >> "%LOG%"
+echo [%date% %time%] Launching: %OLD% --minimized >> "%LOG%"
 start "" "%OLD%" --minimized
 del "%NEW%" > nul 2>&1
+echo [%date% %time%] Update complete >> "%LOG%"
 (goto) 2>nul & del "%~f0"
 """)
         log.info("Update script written: %s", script_path)
