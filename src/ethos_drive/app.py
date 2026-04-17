@@ -299,6 +299,7 @@ class EthosDriveApp(QObject):
             api_client=self.api_client,
             state_db=self.state_db,
             watcher=watcher,
+            max_concurrent=self.config.max_concurrent_transfers,
         )
         engine.progress.connect(lambda p, tid=task.id: self.sync_progress.emit({**p, "task_id": tid}))
         engine.conflict.connect(lambda c, tid=task.id: self.conflict_detected.emit({**c, "task_id": tid}))

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QPushButton, QProgressBar, QFrame,
-    QScrollArea, QSplitter, QSizePolicy, QLineEdit,
+    QScrollArea, QSizePolicy, QLineEdit,
 )
 from PySide6.QtCore import Qt, QTimer
 
@@ -26,113 +26,6 @@ ACTION_ICONS = {
     "delete_remote": "✕",
     "conflict": "⚠",
 }
-
-
-class _TransferItemWidget(QFrame):
-    """Modern single-file transfer card."""
-
-    def __init__(self, path: str, direction: str, parent=None):
-        super().__init__(parent)
-        self.path = path
-        self.direction = direction
-        self.setStyleSheet(f"""
-            _TransferItemWidget {{
-                background: {theme.BG_SURFACE};
-                border: 1px solid {theme.BORDER};
-                border-radius: {theme.RADIUS_SM};
-            }}
-        """)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(6)
-
-        top = QHBoxLayout()
-        top.setSpacing(10)
-
-        arrow = "↑" if direction == "upload" else "↓"
-        arrow_color = theme.SUCCESS if direction == "upload" else theme.INFO
-        self._icon_label = QLabel(arrow)
-        self._icon_label.setStyleSheet(
-            f"color: {arrow_color}; font-size: 16px; font-weight: bold;")
-        self._icon_label.setFixedWidth(20)
-        top.addWidget(self._icon_label)
-
-        filename = os.path.basename(path) if "/" in path or "\\" in path else path
-        self._name_label = QLabel(filename)
-        self._name_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; font-size: 12px;")
-        self._name_label.setToolTip(path)
-        self._name_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        top.addWidget(self._name_label)
-
-        self._speed_label = QLabel("—")
-        self._speed_label.setStyleSheet(
-            f"color: {theme.ACCENT}; font-size: {theme.FONT_SIZE_SM}; min-width: 80px;")
-        self._speed_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        top.addWidget(self._speed_label)
-
-        self._eta_label = QLabel("—")
-        self._eta_label.setStyleSheet(
-            f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_SM}; min-width: 60px;")
-        self._eta_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        top.addWidget(self._eta_label)
-
-        self._size_label = QLabel("")
-        self._size_label.setStyleSheet(
-            f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_SM}; min-width: 100px;")
-        self._size_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        top.addWidget(self._size_label)
-
-        layout.addLayout(top)
-
-        # Thin progress bar
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 1000)
-        self._progress.setValue(0)
-        self._progress.setTextVisible(False)
-        self._progress.setFixedHeight(4)
-        chunk_color = theme.SUCCESS if direction == "upload" else theme.ACCENT
-        self._progress.setStyleSheet(f"""
-            QProgressBar {{
-                background: {theme.BG_INPUT};
-                border: none;
-                border-radius: 2px;
-            }}
-            QProgressBar::chunk {{
-                background: {chunk_color};
-                border-radius: 2px;
-            }}
-        """)
-        layout.addWidget(self._progress)
-
-    def update_progress(self, percent: float, speed_bps: int, eta_sec: int,
-                        transferred: int = 0, total: int = 0):
-        self._progress.setValue(int(percent * 10))
-        self._speed_label.setText(theme.format_speed(speed_bps))
-        self._eta_label.setText(theme.format_eta(eta_sec))
-        if total > 0:
-            self._size_label.setText(
-                f"{theme.format_size(transferred)} / {theme.format_size(total)}")
-
-    def mark_complete(self, success: bool):
-        if success:
-            self._progress.setValue(1000)
-            self._speed_label.setText("✓")
-            self._speed_label.setStyleSheet(
-                f"color: {theme.SUCCESS}; font-size: {theme.FONT_SIZE_SM};")
-            self._eta_label.setText("")
-        else:
-            self._speed_label.setText("✗")
-            self._speed_label.setStyleSheet(
-                f"color: {theme.ERROR}; font-size: {theme.FONT_SIZE_SM};")
-            self._progress.setStyleSheet(f"""
-                QProgressBar {{
-                    background: {theme.BG_INPUT}; border: none; border-radius: 2px;
-                }}
-                QProgressBar::chunk {{
-                    background: {theme.ERROR}; border-radius: 2px;
-                }}
-            """)
 
 
 class _HistoryItemWidget(QFrame):
@@ -212,15 +105,17 @@ class _HistoryItemWidget(QFrame):
 
 
 class ActivityWidget(QWidget):
-    """Modern transfer & history panel with real-time progress."""
+    """Clean global progress + history panel."""
 
     def __init__(self, app: "EthosDriveApp"):
         super().__init__()
         self.drive_app = app
-        self._transfer_widgets: dict[str, _TransferItemWidget] = {}
         self._history_widgets: list[_HistoryItemWidget] = []
-        self._completed_count = 0
-        self._total_queued = 0
+        # Progress tracking from engine phase signals
+        self._total_actions = 0
+        self._done_actions = 0
+        self._current_file = ""
+        self._current_action = ""
         self._total_bytes_transferred = 0
         self._total_bytes_all = 0
         self._session_start = 0.0
@@ -245,7 +140,7 @@ class ActivityWidget(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        # ── Overall progress panel ──
+        # ── Global progress panel ──
         overall_panel = QFrame()
         overall_panel.setStyleSheet(f"""
             QFrame {{
@@ -261,7 +156,7 @@ class ActivityWidget(QWidget):
         # Title row
         title_row = QHBoxLayout()
         title_row.setSpacing(12)
-        title_lbl = QLabel("Transfers")
+        title_lbl = QLabel("Sync Progress")
         title_lbl.setStyleSheet(
             f"font-weight: 600; font-size: {theme.FONT_SIZE_LG}; color: {theme.TEXT_PRIMARY};")
         title_row.addWidget(title_lbl)
@@ -294,13 +189,40 @@ class ActivityWidget(QWidget):
 
         op_layout.addLayout(title_row)
 
-        # Overall progress bar (thin)
+        # ── Big progress bar with percentage ──
         self._overall_progress = QProgressBar()
         self._overall_progress.setRange(0, 1000)
         self._overall_progress.setValue(0)
         self._overall_progress.setTextVisible(False)
-        self._overall_progress.setFixedHeight(4)
+        self._overall_progress.setFixedHeight(24)
+        self._overall_progress.setStyleSheet(f"""
+            QProgressBar {{
+                background: {theme.BG_INPUT};
+                border: none;
+                border-radius: 12px;
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {theme.ACCENT}, stop:1 {theme.SUCCESS});
+                border-radius: 12px;
+            }}
+        """)
         op_layout.addWidget(self._overall_progress)
+
+        # Percentage + current file label
+        pct_row = QHBoxLayout()
+        pct_row.setSpacing(8)
+        self._pct_label = QLabel("0%")
+        self._pct_label.setStyleSheet(
+            f"color: {theme.TEXT_PRIMARY}; font-size: 18px; font-weight: 700; min-width: 50px;")
+        pct_row.addWidget(self._pct_label)
+
+        self._current_file_label = QLabel("")
+        self._current_file_label.setStyleSheet(
+            f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_SM};")
+        self._current_file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        pct_row.addWidget(self._current_file_label)
+        op_layout.addLayout(pct_row)
 
         # Stats row
         stats_row = QHBoxLayout()
@@ -321,42 +243,7 @@ class ActivityWidget(QWidget):
         op_layout.addLayout(stats_row)
         layout.addWidget(overall_panel)
 
-        # ── Splitter: active transfers / history ──
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setStyleSheet(f"QSplitter::handle {{ background: {theme.BORDER}; height: 1px; }}")
-
-        # Active transfers
-        transfers_container = QWidget()
-        tc_layout = QVBoxLayout(transfers_container)
-        tc_layout.setContentsMargins(0, 0, 0, 0)
-        tc_layout.setSpacing(6)
-
-        tf_header = QLabel("Active")
-        tf_header.setStyleSheet(
-            f"font-weight: 600; font-size: {theme.FONT_SIZE}; color: {theme.TEXT_SECONDARY};")
-        tc_layout.addWidget(tf_header)
-
-        self._transfers_scroll = QScrollArea()
-        self._transfers_scroll.setWidgetResizable(True)
-        self._transfers_scroll.setFrameShape(QFrame.NoFrame)
-
-        self._transfers_list = QWidget()
-        self._transfers_layout = QVBoxLayout(self._transfers_list)
-        self._transfers_layout.setContentsMargins(0, 0, 0, 0)
-        self._transfers_layout.setSpacing(4)
-        self._transfers_layout.addStretch()
-
-        self._no_transfers_label = QLabel("No active transfers")
-        self._no_transfers_label.setStyleSheet(
-            f"color: {theme.TEXT_DISABLED}; font-size: {theme.FONT_SIZE}; padding: 24px;")
-        self._no_transfers_label.setAlignment(Qt.AlignCenter)
-        self._transfers_layout.insertWidget(0, self._no_transfers_label)
-
-        self._transfers_scroll.setWidget(self._transfers_list)
-        tc_layout.addWidget(self._transfers_scroll)
-        splitter.addWidget(transfers_container)
-
-        # History section
+        # ── History section ──
         history_container = QWidget()
         hc_layout = QVBoxLayout(history_container)
         hc_layout.setContentsMargins(0, 8, 0, 0)
@@ -419,10 +306,7 @@ class ActivityWidget(QWidget):
 
         self._history_scroll.setWidget(self._history_list)
         hc_layout.addWidget(self._history_scroll)
-        splitter.addWidget(history_container)
-
-        splitter.setSizes([250, 350])
-        layout.addWidget(splitter)
+        layout.addWidget(history_container, 1)  # stretch to fill
 
     # ── Progress handling ──────────────────────────────────────
 
@@ -430,7 +314,7 @@ class ActivityWidget(QWidget):
         phase = data.get("phase", "")
         if phase:
             now = time.monotonic()
-            if now - self._last_phase_update < 0.25:
+            if now - self._last_phase_update < 0.15:
                 return
             self._last_phase_update = now
 
@@ -438,168 +322,135 @@ class ActivityWidget(QWidget):
             done_actions = data.get("done", 0)
             pct = data.get("percent", 0)
             label = data.get("file", "")
+            action = data.get("action", "")
+
+            if self._session_start == 0 and phase != "error":
+                self._session_start = time.time()
 
             if phase in ("scanning", "planning"):
-                self._overall_status.setText(label)
+                self._overall_status.setText(
+                    "Scanning…" if phase == "scanning" else "Planning…")
                 self._overall_status.setStyleSheet(
                     f"color: {theme.WARNING}; font-size: {theme.FONT_SIZE}; font-weight: 500;")
-                self._overall_progress.setValue(int(pct * 10))
+                # scanning/planning: show indeterminate-ish progress (0-10%)
+                bar_pct = pct * 0.1  # 0-50% of scanning → 0-5% of bar
+                self._overall_progress.setValue(int(bar_pct * 10))
+                self._pct_label.setText(f"{int(bar_pct)}%")
+                self._current_file_label.setText(label)
+                self._pause_btn.setVisible(True)
+                self._cancel_all_btn.setVisible(True)
+
             elif phase == "syncing":
-                # Per-file transfer progress from engine
-                action = data.get("action", "")
-                speed = data.get("speed", 0)
-                eta = data.get("eta", 0)
-                transferred = data.get("transferred", 0)
-                total = data.get("total", 0)
-                file_path = data.get("file", "")
+                self._total_actions = total_actions
+                self._done_actions = done_actions
+                self._current_file = label
+                self._current_action = action
 
-                if action in ("upload", "download") and file_path:
-                    if file_path not in self._transfer_widgets:
-                        self._add_transfer_widget(file_path, action)
-                    widget = self._transfer_widgets.get(file_path)
-                    if widget:
-                        widget.update_progress(pct, speed, eta, transferred, total)
-
-                    self._total_bytes_transferred = sum(
-                        d.get("transferred", 0) for d in self._get_active_dicts())
-                    self._total_bytes_all = sum(
-                        d.get("total", 0) for d in self._get_active_dicts())
-
-                    if pct >= 100:
-                        self._completed_count += 1
-                        if widget:
-                            widget.mark_complete(True)
-                        QTimer.singleShot(3000,
-                                          lambda p=file_path: self._remove_transfer_widget(p))
+                # Per-file transfer progress from engine progress callback
+                if action in ("upload", "download") and label:
+                    speed = data.get("speed", 0)
+                    transferred = data.get("transferred", 0)
+                    total = data.get("total", 0)
+                    if transferred > 0 and total > 0:
+                        self._total_bytes_transferred += max(
+                            0, transferred - getattr(self, '_last_file_transferred', 0))
+                        self._last_file_transferred = transferred
+                        self._total_bytes_all = max(self._total_bytes_all, total)
+                    arrow = "↑" if action == "upload" else "↓"
+                    fname = os.path.basename(label) if ("/" in label or "\\" in label) else label
+                    self._current_file_label.setText(f"{arrow} {fname}")
                     return
 
+                # Phase progress (done/total actions)
+                self._last_file_transferred = 0
                 self._overall_status.setText(f"Syncing ({done_actions}/{total_actions})")
                 self._overall_status.setStyleSheet(
                     f"color: {theme.ACCENT}; font-size: {theme.FONT_SIZE}; font-weight: 500;")
-                self._overall_progress.setValue(int(pct * 10))
+                # Map 0-100% of syncing to 10-100% of bar
+                bar_pct = 10 + pct * 0.9
+                self._overall_progress.setValue(int(bar_pct * 10))
+                self._pct_label.setText(f"{int(bar_pct)}%")
                 self._files_label.setText(f"{done_actions} / {total_actions} files")
+                self._pause_btn.setVisible(True)
+                self._cancel_all_btn.setVisible(True)
+
+                if done_actions >= total_actions and total_actions > 0:
+                    self._on_sync_complete()
+
+            elif phase == "error":
+                self._overall_status.setText(label)
+                self._overall_status.setStyleSheet(
+                    f"color: {theme.ERROR}; font-size: {theme.FONT_SIZE}; font-weight: 500;")
             return
 
         # Per-file transfer progress (from TransferManager directly)
         path = data.get("path", "")
         direction = data.get("direction", "")
-        percent = data.get("percent", 0)
         speed = data.get("speed_bps", 0)
-        eta = data.get("eta_seconds", 0)
         transferred = data.get("transferred", 0)
         total = data.get("total", 0)
 
-        if path not in self._transfer_widgets:
-            self._add_transfer_widget(path, direction)
+        if path:
+            arrow = "↑" if direction == "upload" else "↓"
+            fname = os.path.basename(path) if ("/" in path or "\\" in path) else path
+            self._current_file_label.setText(f"{arrow} {fname}")
 
-        widget = self._transfer_widgets[path]
-        widget.update_progress(percent, speed, eta, transferred, total)
-
-        self._total_bytes_transferred = sum(
-            d.get("transferred", 0) for d in self._get_active_dicts())
-        self._total_bytes_all = sum(
-            d.get("total", 0) for d in self._get_active_dicts())
-
-        if percent >= 100:
-            self._completed_count += 1
-            widget.mark_complete(True)
-            QTimer.singleShot(3000, lambda p=path: self._remove_transfer_widget(p))
-
-    def _get_active_dicts(self) -> list[dict]:
-        result = []
-        for engine in self.drive_app.engines.values():
-            if hasattr(engine, 'transfer_mgr'):
-                result.extend(engine.transfer_mgr.active_transfers)
-        return result
-
-    def _add_transfer_widget(self, path: str, direction: str):
-        if self._no_transfers_label.isVisible():
-            self._no_transfers_label.setVisible(False)
-        if self._session_start == 0:
-            self._session_start = time.time()
-
-        widget = _TransferItemWidget(path, direction)
-        self._transfer_widgets[path] = widget
-        idx = self._transfers_layout.count() - 1
-        self._transfers_layout.insertWidget(idx, widget)
-        self._total_queued += 1
-        self._update_buttons_visibility()
-
-    def _remove_transfer_widget(self, path: str):
-        widget = self._transfer_widgets.pop(path, None)
-        if widget:
-            self._transfers_layout.removeWidget(widget)
-            widget.deleteLater()
-        if not self._transfer_widgets:
-            self._no_transfers_label.setVisible(True)
-            self._update_buttons_visibility()
-            if self._completed_count > 0:
-                self._overall_progress.setValue(1000)
-                self._overall_status.setText(
-                    f"✓ {self._completed_count} files transferred")
-                self._overall_status.setStyleSheet(
-                    f"color: {theme.SUCCESS}; font-size: {theme.FONT_SIZE}; font-weight: 500;")
-                QTimer.singleShot(10000, self._reset_session)
+    def _on_sync_complete(self):
+        self._overall_progress.setValue(1000)
+        self._pct_label.setText("100%")
+        done = self._done_actions
+        self._overall_status.setText(f"✓ {done} files synced")
+        self._overall_status.setStyleSheet(
+            f"color: {theme.SUCCESS}; font-size: {theme.FONT_SIZE}; font-weight: 500;")
+        self._current_file_label.setText("")
+        self._pause_btn.setVisible(False)
+        self._cancel_all_btn.setVisible(False)
+        QTimer.singleShot(15000, self._reset_session)
 
     def _reset_session(self):
-        if self._transfer_widgets:
-            return
-        self._completed_count = 0
-        self._total_queued = 0
+        if self._total_actions > 0 and self._done_actions < self._total_actions:
+            return  # Still syncing
+        self._total_actions = 0
+        self._done_actions = 0
         self._total_bytes_transferred = 0
         self._total_bytes_all = 0
         self._session_start = 0.0
+        self._last_file_transferred = 0
         self._overall_progress.setValue(0)
+        self._pct_label.setText("0%")
         self._overall_status.setText("Idle")
         self._overall_status.setStyleSheet(
             f"color: {theme.SUCCESS}; font-size: {theme.FONT_SIZE}; font-weight: 500;")
+        self._current_file_label.setText("")
         self._files_label.setText("0 / 0 files")
         self._size_label.setText("—")
         self._speed_label.setText("—")
         self._eta_label.setText("—")
 
     def _update_overall_stats(self):
-        active = len(self._transfer_widgets)
-        if active == 0 and self._completed_count == 0:
+        if self._total_actions == 0:
             return
 
-        total_files = self._total_queued
-        done_files = self._completed_count
-        self._files_label.setText(
-            f"{done_files} / {total_files} files"
-            + (f"  ({active} active)" if active else ""))
+        # Aggregate speed from active TransferManager transfers
+        active_dicts = []
+        for engine in self.drive_app.engines.values():
+            if hasattr(engine, 'transfer_mgr'):
+                active_dicts.extend(engine.transfer_mgr.active_transfers)
 
-        if self._total_bytes_all > 0:
-            self._size_label.setText(
-                f"{theme.format_size(self._total_bytes_transferred)} / "
-                f"{theme.format_size(self._total_bytes_all)}")
-
-        if total_files > 0:
-            active_dicts = self._get_active_dicts()
-            active_pct_sum = sum(d.get("percent", 0) for d in active_dicts) / 100.0
-            effective_done = done_files + active_pct_sum
-            overall_pct = (effective_done / total_files) * 100
-            self._overall_progress.setValue(int(overall_pct * 10))
-
-        active_dicts = self._get_active_dicts()
         total_speed = sum(d.get("speed_bps", 0) for d in active_dicts)
         if total_speed > 0:
             self._speed_label.setText(theme.format_speed(total_speed))
             remaining = max(0, self._total_bytes_all - self._total_bytes_transferred)
             eta_sec = int(remaining / total_speed) if total_speed > 0 else 0
             self._eta_label.setText(theme.format_eta(eta_sec))
-        elif active == 0:
+        elif not active_dicts:
             self._speed_label.setText("—")
             self._eta_label.setText("—")
 
-    def _update_buttons_visibility(self):
-        has_active = len(self._transfer_widgets) > 0
-        self._pause_btn.setVisible(has_active)
-        self._cancel_all_btn.setVisible(has_active)
-        if has_active:
-            self._overall_status.setText("Transferring")
-            self._overall_status.setStyleSheet(
-                f"color: {theme.ACCENT}; font-size: {theme.FONT_SIZE}; font-weight: 500;")
+        if self._total_bytes_all > 0:
+            self._size_label.setText(
+                f"{theme.format_size(self._total_bytes_transferred)} / "
+                f"{theme.format_size(self._total_bytes_all)}")
 
     def _toggle_pause(self):
         if self.drive_app.status == "paused":
@@ -621,7 +472,7 @@ class ActivityWidget(QWidget):
                 f"color: {theme.ACCENT}; font-size: {theme.FONT_SIZE}; font-weight: 500;")
         elif base == "idle":
             self._pause_btn.setText("⏸  Pause")
-            if not self._transfer_widgets:
+            if self._total_actions == 0:
                 self._overall_status.setText("Idle")
                 self._overall_status.setStyleSheet(
                     f"color: {theme.SUCCESS}; font-size: {theme.FONT_SIZE}; font-weight: 500;")
@@ -634,15 +485,14 @@ class ActivityWidget(QWidget):
         for engine in self.drive_app.engines.values():
             if hasattr(engine, 'transfer_mgr'):
                 engine.transfer_mgr.cancel_all()
-        for path in list(self._transfer_widgets.keys()):
-            w = self._transfer_widgets.get(path)
-            if w:
-                w.mark_complete(False)
-        QTimer.singleShot(2000, self._clear_all_transfers)
-
-    def _clear_all_transfers(self):
-        for path in list(self._transfer_widgets.keys()):
-            self._remove_transfer_widget(path)
+            engine._cancelled = True
+        self._overall_status.setText("Cancelled")
+        self._overall_status.setStyleSheet(
+            f"color: {theme.ERROR}; font-size: {theme.FONT_SIZE}; font-weight: 500;")
+        self._current_file_label.setText("")
+        self._pause_btn.setVisible(False)
+        self._cancel_all_btn.setVisible(False)
+        QTimer.singleShot(5000, self._reset_session)
 
     # ── History ────────────────────────────────────────────────
 

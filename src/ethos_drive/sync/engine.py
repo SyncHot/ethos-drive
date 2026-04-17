@@ -6,6 +6,7 @@ resolves conflicts, and orchestrates file transfers.
 
 import logging
 import os
+import threading
 import time
 from typing import Optional
 
@@ -66,7 +67,8 @@ class SyncEngine(QObject):
     completed = Signal(dict)      # {uploaded, downloaded, deleted, conflicts, errors}
 
     def __init__(self, task: SyncTask, api_client: EthosAPIClient,
-                 state_db: SyncStateDB, watcher=None):
+                 state_db: SyncStateDB, watcher=None,
+                 max_concurrent: int = 3):
         super().__init__()
         self.task = task
         self.api = api_client
@@ -82,6 +84,7 @@ class SyncEngine(QObject):
         self.version_tracker = VersionTracker(state_db, task.id)
         self.transfer_mgr = TransferManager(
             api_client=api_client,
+            max_concurrent=max_concurrent,
             max_upload_kbps=task.max_upload_kbps,
             max_download_kbps=task.max_download_kbps,
         )
@@ -178,13 +181,36 @@ class SyncEngine(QObject):
                                 "action": "plan", "percent": 50, "speed": 0})
             actions = self._plan_sync(local_files, remote_files, synced_state)
 
-            # Step 5: Execute actions
+            # Step 5: Execute actions — transfers run concurrently
             total_actions = len(actions)
             self.progress.emit({"phase": "syncing",
                                 "file": f"Syncing {total_actions} items...",
                                 "action": "sync", "percent": 0, "speed": 0,
                                 "total": total_actions, "done": 0})
-            for i, action in enumerate(actions):
+
+            # Split: sequential ops first, then batch transfers
+            sequential = []
+            transfers = []
+            for action in actions:
+                if action.action in (SyncAction.UPLOAD, SyncAction.DOWNLOAD):
+                    transfers.append(action)
+                else:
+                    sequential.append(action)
+
+            done_count = [0]
+            stats_lock = threading.Lock()
+
+            def _emit_progress(action):
+                done_count[0] += 1
+                pct = (done_count[0] / total_actions * 100) if total_actions else 100
+                self.progress.emit({
+                    "phase": "syncing", "file": action.path,
+                    "action": action.action, "percent": round(pct, 1),
+                    "speed": 0, "total": total_actions, "done": done_count[0],
+                })
+
+            # Run mkdir/delete/move/conflict actions sequentially
+            for action in sequential:
                 if self._cancelled:
                     break
                 try:
@@ -194,14 +220,37 @@ class SyncEngine(QObject):
                     stats["errors"] += 1
                     self.db.log_action(self.task.id, action.action, action.path,
                                        detail=str(e), success=False)
-                # Emit progress every file (debounced by UI)
-                done = i + 1
-                pct = (done / total_actions * 100) if total_actions else 100
-                self.progress.emit({
-                    "phase": "syncing", "file": action.path,
-                    "action": action.action, "percent": round(pct, 1),
-                    "speed": 0, "total": total_actions, "done": done,
-                })
+                _emit_progress(action)
+
+            # Run uploads/downloads concurrently via thread pool
+            if transfers and not self._cancelled:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                def _run_transfer(action):
+                    local_stats = {"uploaded": 0, "downloaded": 0, "errors": 0}
+                    if self._cancelled:
+                        return action, local_stats
+                    try:
+                        self._execute_action(action, local_stats)
+                    except Exception as e:
+                        log.error("Transfer failed %s: %s", action, e)
+                        local_stats["errors"] += 1
+                        self.db.log_action(self.task.id, action.action, action.path,
+                                           detail=str(e), success=False)
+                    return action, local_stats
+
+                max_workers = self.transfer_mgr.max_concurrent
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = {pool.submit(_run_transfer, a): a for a in transfers}
+                    for future in as_completed(futures):
+                        if self._cancelled:
+                            break
+                        action, local_stats = future.result()
+                        with stats_lock:
+                            stats["uploaded"] += local_stats["uploaded"]
+                            stats["downloaded"] += local_stats["downloaded"]
+                            stats["errors"] += local_stats["errors"]
+                        _emit_progress(action)
 
             # Update task state
             elapsed = time.time() - start
